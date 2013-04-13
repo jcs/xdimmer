@@ -3,9 +3,9 @@ by joshua stein <jcs@jcs.org>
 ===============================================================================
 
 xdimmer is a lightweight X11 utility to dim the screen backlight when idle,
-then brighten it back up when movement is detected.  This power-saving
-behavior is common on other operating systems and in bloated X11 frameworks
-like GNOME.
+then brighten it back up when mouse or keyboard activity is detected.  This
+power-saving behavior is common on other operating systems and in bloated
+X11 frameworks like GNOME.
 
 xdimmer works independently of any screen saver/locker such as xidle or
 xautolock, so it is free to dim the screen prior to the existing locker
