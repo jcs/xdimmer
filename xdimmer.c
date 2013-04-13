@@ -167,7 +167,7 @@ xloop(void)
 
 		if (alarm_e->alarm == idle_alarm) {
 			if (debug)
-				printf("idle counter reached %dms, dimming\n",
+				printf("idle counter reached %dms\n",
 					XSyncValueLow32(alarm_e->counter_value));
 
 			XSyncDestroyAlarm(dpy, idle_alarm);
@@ -184,7 +184,7 @@ xloop(void)
 		}
 		else if (alarm_e->alarm == reset_alarm) {
 			if (debug)
-				printf("idle counter reset, brightening\n");
+				printf("idle counter reset\n");
 
 			XSyncDestroyAlarm(dpy, reset_alarm);
 			reset_alarm = None;
@@ -226,15 +226,33 @@ set_alarm(XSyncAlarm *alarm, XSyncCounter counter, XSyncTestType test,
 void
 dim(void)
 {
-	backlight = backlight_op(1, dim_pct, DIM_STEPS);
-	dimmed = 1;
+	backlight = backlight_op(0, 0, 0);
+	if (backlight > dim_pct) {
+		if (debug)
+			printf("dimming to %d\n", dim_pct);
+
+		backlight = backlight_op(1, dim_pct, DIM_STEPS);
+		dimmed = 1;
+	}
+	else if (debug)
+		printf("backlight already at %f, not dimming to %d\n",
+		    backlight, dim_pct);
 }
 
 void
 brighten(void)
 {
-	if (backlight != -1)
+	if (backlight == -1)
+		backlight = backlight_op(0, 0, 0);
+
+	if (backlight > 0) {
+		if (debug)
+			printf("brightening back to %f\n", backlight);
+
 		backlight_op(1, backlight, BRIGHTEN_STEPS);
+	}
+	else if (debug)
+		printf("no previous backlight setting, not brightening\n");
 
 	dimmed = 0;
 }
@@ -305,6 +323,8 @@ backlight_op(int set, double new_backlight, int steps)
 				to = max;
 
 			step_inc = (to - value) / steps;
+			if (step_inc < 1)
+				step_inc = 1;
 
 			if (debug)
 				printf("stepping from %ld to %ld in "
