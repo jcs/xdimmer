@@ -1,0 +1,38 @@
+.Dd $Mdocdate: October 27 2015$
+.Dt XDIMMER 1
+.Os
+.Sh NAME
+.Nm xdimmer
+.Nd dim the screen when idle
+.Sh SYNOPSIS
+.Nm
+.Op Fl d
+.Op Fl p Ar percent
+.Op Fl t Ar timeout
+.Sh DESCRIPTION
+.Nm
+waits
+.Ar timeout
+number of seconds and if no keyboard or mouse input is detected, the screen
+is dimmed to
+.Ar percent .
+Once keyboard or mouse input is detected, the screen is restored to its
+previous brightness value.
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl d
+Print debugging messages to stdout.
+.It Fl p Ar percent
+Absolute brightness value to which the screen is dimmed.
+The default is
+.Dv 5
+percent.
+.It Fl t Ar timeout
+Number of seconds to wait without receiving input before dimming screen.
+The default is
+.Dv 60
+seconds.
+.Sh AUTHORS
+.Nm
+was written by
+.An joshua stein Aq Mt jcs@jcs.org .

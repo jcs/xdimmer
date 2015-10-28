@@ -7,8 +7,10 @@ CFLAGS	?= -O2 -Wall -Wunused -Wmissing-prototypes -Wstrict-prototypes
 
 PREFIX	?= /usr/local
 BINDIR	?= $(DESTDIR)$(PREFIX)/bin
+MANDIR	?= $(DESTDIR)$(PREFIX)/man/man1
 
 INSTALL_PROGRAM ?= install -s
+INSTALL_DATA ?= install
 
 X11BASE	?= /usr/X11R6
 INCLUDES?= -I$(X11BASE)/include
@@ -27,7 +29,10 @@ $(OBJS): *.c
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
 install: all
+	mkdir -p $(BINDIR)
 	$(INSTALL_PROGRAM) $(PROG) $(BINDIR)
+	mkdir -p $(MANDIR)
+	$(INSTALL_DATA) -m 644 xdimmer.1 $(MANDIR)/xdimmer.1
 
 clean:
 	rm -f $(PROG) $(OBJS)
