@@ -153,7 +153,13 @@ xloop(void)
 		int overflow;
 		XSyncValue add, plusone;
 
+		if (debug)
+			printf("waiting for next event\n");
+
 		XNextEvent(dpy, &e);
+
+		if (debug)
+			printf("got event of type %d\n", e.type);
 
 		if (exiting) {
 			brighten();
@@ -328,7 +334,7 @@ backlight_op(int set, double new_backlight, int steps)
 
 			if (debug)
 				printf("stepping from %ld to %ld in "
-				    "increments of %d (%d step%s)\n",
+				    "increments of %d (%d step%s)... ",
 				    value, to, step_inc, steps,
 				    (steps == 1 ? "" : "s"));
 
@@ -337,6 +343,9 @@ backlight_op(int set, double new_backlight, int steps)
 
 				if (j == steps)
 					value = to;
+
+				if (debug)
+					printf(" %ld", value);
 
 				XRRChangeOutputProperty(dpy, output,
 				    backlight_a, XA_INTEGER, 32,
@@ -347,6 +356,9 @@ backlight_op(int set, double new_backlight, int steps)
 				if (j < steps)
 					usleep(100);
 			}
+
+			if (debug)
+				printf("\n");
 		}
 		else
 			/* just return the first screen's backlight */
