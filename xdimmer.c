@@ -179,14 +179,14 @@ xloop(void)
 			XSyncDestroyAlarm(dpy, idle_alarm);
 			idle_alarm = None;
 
+			dim();
+
 			/* fire reset_alarm when idletime counter resets */
 			XSyncIntToValue(&add, -1);
 			XSyncValueAdd(&plusone, alarm_e->counter_value, add,
 			    &overflow);
 			set_alarm(&reset_alarm, idler, XSyncNegativeComparison,
 			    plusone);
-
-			dim();
 		}
 		else if (alarm_e->alarm == reset_alarm) {
 			if (debug)
@@ -195,11 +195,11 @@ xloop(void)
 			XSyncDestroyAlarm(dpy, reset_alarm);
 			reset_alarm = None;
 
+			brighten();
+
 			XSyncIntToValue(&val, dim_timeout * 1000);
 			set_alarm(&idle_alarm, idler, XSyncPositiveComparison,
 			    val);
-
-			brighten();
 		}
 	}
 }
