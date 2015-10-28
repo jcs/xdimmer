@@ -274,8 +274,7 @@ backlight_op(int set, double new_backlight, int steps)
 	XRRPropertyInfo *info;
 	long value, to;
 	double min, max;
-	unsigned int step_inc;
-	int i;
+	int step_inc, i;
 
 	double cur_backlight = -1.0;
 
@@ -328,9 +327,10 @@ backlight_op(int set, double new_backlight, int steps)
 			if (to > max)
 				to = max;
 
-			step_inc = (to - value) / steps;
-			if (step_inc < 1)
-				step_inc = 1;
+			if (to == value)
+				steps = 0;
+			else
+				step_inc = (to - value) / steps;
 
 			if (debug)
 				printf("stepping from %ld to %ld in "
