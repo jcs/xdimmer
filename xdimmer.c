@@ -41,10 +41,10 @@
 #include <X11/extensions/sync.h>
 #include <X11/extensions/Xrandr.h>
 
-#define DEFAULT_DIM_TIMEOUT	60
-#define DEFAULT_DIM_PERCENTAGE	5
+#define DEFAULT_DIM_TIMEOUT	120
+#define DEFAULT_DIM_PERCENTAGE	10
 
-#define DIM_STEPS		10
+#define DIM_STEPS		20
 #define BRIGHTEN_STEPS		5
 
 void xloop(void);
@@ -353,8 +353,8 @@ backlight_op(int set, double new_backlight, int steps)
 				    (unsigned char *)&value, 1);
 				XSync(dpy, True);
 
-				if (j < steps)
-					usleep(100);
+				if (j < steps && step_inc < 0)
+					usleep(20000);
 			}
 
 			if (debug)
