@@ -100,6 +100,11 @@ main(int argc, char *argv[])
 	if (!(dpy = XOpenDisplay(NULL)))
 		errx(1, "can't open display %s", XDisplayName(NULL));
 
+#ifdef __OpenBSD__
+	if (pledge("stdio", NULL) == -1)
+		err(1, "pledge");
+#endif
+
 	backlight_a = XInternAtom(dpy, RR_PROPERTY_BACKLIGHT, True);
 	if (backlight_a == None)
 		errx(1, "no backlight control");
