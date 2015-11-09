@@ -1,6 +1,6 @@
 /*
- * xidledim
- * Copyright (c) 2013 joshua stein <jcs@jcs.org>
+ * xdimmer
+ * Copyright (c) 2013, 2015 joshua stein <jcs@jcs.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -354,7 +354,7 @@ backlight_op(int set, double new_backlight, int steps)
 				XSync(dpy, True);
 
 				if (j < steps && step_inc < 0)
-					usleep(20000);
+					usleep(15000);
 			}
 
 			if (debug)
