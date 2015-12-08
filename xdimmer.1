@@ -1,4 +1,4 @@
-.Dd $Mdocdate: October 27 2015$
+.Dd $Mdocdate: December 8 2015$
 .Dt XDIMMER 1
 .Os
 .Sh NAME
@@ -8,6 +8,7 @@
 .Nm
 .Op Fl d
 .Op Fl p Ar percent
+.Op Fl s Ar steps
 .Op Fl t Ar timeout
 .Sh DESCRIPTION
 .Nm
@@ -15,7 +16,10 @@ waits
 .Ar timeout
 number of seconds and if no keyboard or mouse input is detected, the screen
 is dimmed to
-.Ar percent .
+.Ar percent
+in
+.Ar steps
+steps.
 Once keyboard or mouse input is detected, the screen is restored to its
 previous brightness value.
 .Sh OPTIONS
@@ -27,6 +31,11 @@ Absolute brightness value to which the screen is dimmed.
 The default is
 .Dv 10
 percent.
+.It Fl t Ar steps
+Number of steps to take while decrementing screen brightness.
+The default is
+.Dv 20
+steps.
 .It Fl t Ar timeout
 Number of seconds to wait without receiving input before dimming screen.
 The default is

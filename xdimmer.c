@@ -65,6 +65,7 @@ static int exiting = 0;
 
 static int dim_timeout = DEFAULT_DIM_TIMEOUT;
 static int dim_pct = DEFAULT_DIM_PERCENTAGE;
+static int dim_steps = DIM_STEPS;
 
 static Display *dpy;
 
@@ -73,7 +74,7 @@ main(int argc, char *argv[])
 {
 	int ch;
 
-	while ((ch = getopt(argc, argv, "dp:t:")) != -1) {
+	while ((ch = getopt(argc, argv, "dp:s:t:")) != -1) {
 		const char *errstr;
 
 		switch (ch) {
@@ -84,6 +85,11 @@ main(int argc, char *argv[])
 			dim_pct = strtonum(optarg, 1, 100, &errstr);
 			if (errstr)
 				errx(2, "dim percentage: %s", errstr);
+			break;
+		case 's':
+			dim_steps = strtonum(optarg, 1, 100, &errstr);
+			if (errstr)
+				errx(2, "dim steps: %s", errstr);
 			break;
 		case 't':
 			dim_timeout = strtonum(optarg, 1, INT_MAX, &errstr);
@@ -242,7 +248,7 @@ dim(void)
 		if (debug)
 			printf("dimming to %d\n", dim_pct);
 
-		backlight = backlight_op(1, dim_pct, DIM_STEPS);
+		backlight = backlight_op(1, dim_pct, dim_steps);
 		dimmed = 1;
 	}
 	else if (debug)
@@ -378,8 +384,8 @@ backlight_op(int set, double new_backlight, int steps)
 void
 usage(void)
 {
-	fprintf(stderr, "usage: %s [-d] [-p dim pct] [-t timeout secs]\n",
-	    __progname);
+	fprintf(stderr, "usage: %s [-d] [-p dim pct] [-s dim steps] "
+	    "[-t timeout secs]\n", __progname);
 	exit(1);
 }
 
