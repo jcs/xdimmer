@@ -1,6 +1,6 @@
 /*
  * xdimmer
- * Copyright (c) 2013, 2015 joshua stein <jcs@jcs.org>
+ * Copyright (c) 2013-2016 joshua stein <jcs@jcs.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -35,6 +35,12 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifdef __OpenBSD__
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <dev/wscons/wsconsio.h>
+#endif
+
 #include <X11/X.h>
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
@@ -47,12 +53,18 @@
 #define DIM_STEPS		20
 #define BRIGHTEN_STEPS		5
 
+enum {
+	OP_GET,
+	OP_SET,
+};
+
 void xloop(void);
 void set_alarm(XSyncAlarm *, XSyncCounter, XSyncTestType, XSyncValue);
 void dim(void);
 void brighten(void);
 void bail(int);
-double backlight_op(int, double, int);
+void stepper(int, double, int);
+double backlight_op(int, double);
 void usage(void);
 
 extern char *__progname;
@@ -66,6 +78,8 @@ static int exiting = 0;
 static int dim_timeout = DEFAULT_DIM_TIMEOUT;
 static int dim_pct = DEFAULT_DIM_PERCENTAGE;
 static int dim_steps = DIM_STEPS;
+
+static int wsconsfd = 0;
 
 static Display *dpy;
 
@@ -106,14 +120,24 @@ main(int argc, char *argv[])
 	if (!(dpy = XOpenDisplay(NULL)))
 		errx(1, "can't open display %s", XDisplayName(NULL));
 
-#ifdef __OpenBSD__
-	if (pledge("stdio", NULL) == -1)
-		err(1, "pledge");
-#endif
-
 	backlight_a = XInternAtom(dpy, RR_PROPERTY_BACKLIGHT, True);
-	if (backlight_a == None)
-		errx(1, "no backlight control");
+	if (backlight_a == None) {
+#ifdef __OpenBSD__
+		/* see if wscons display.brightness is available */
+		if (!(wsconsfd = open("/dev/ttyC0", O_WRONLY)) ||
+		    backlight_op(OP_GET, 0) < 0)
+#endif
+			errx(1, "no backlight control");
+	} else {
+#ifdef __OpenBSD__
+		/*
+		 * unfortunately we can't pledge() with wscons interface,
+		 * because the ws*io* ioctls aren't whitelisted
+		 */
+		if (pledge("stdio", NULL) == -1)
+			err(1, "pledge");
+#endif
+	}
 
 	if (debug)
 		printf("dimming to %d%% in %d secs\n", dim_pct, dim_timeout);
@@ -243,12 +267,13 @@ set_alarm(XSyncAlarm *alarm, XSyncCounter counter, XSyncTestType test,
 void
 dim(void)
 {
-	backlight = backlight_op(0, 0, 0);
+	backlight = backlight_op(OP_GET, 0);
+
 	if (backlight > dim_pct) {
 		if (debug)
 			printf("dimming to %d\n", dim_pct);
 
-		backlight = backlight_op(1, dim_pct, dim_steps);
+		stepper(OP_SET, dim_pct, dim_steps);
 		dimmed = 1;
 	}
 	else if (debug)
@@ -259,14 +284,11 @@ dim(void)
 void
 brighten(void)
 {
-	if (backlight == -1)
-		backlight = backlight_op(0, 0, 0);
-
 	if (backlight > 0) {
 		if (debug)
 			printf("brightening back to %f\n", backlight);
 
-		backlight_op(1, backlight, BRIGHTEN_STEPS);
+		stepper(OP_SET, backlight, BRIGHTEN_STEPS);
 	}
 	else if (debug)
 		printf("no previous backlight setting, not brightening\n");
@@ -274,8 +296,44 @@ brighten(void)
 	dimmed = 0;
 }
 
+void
+stepper(int op, double new_backlight, int steps)
+{
+	double tbacklight = backlight_op(OP_GET, 0);
+	int step_inc = 0, j;
+
+	if ((int)new_backlight == (int)tbacklight)
+		steps = 0;
+	else
+		step_inc = (new_backlight - tbacklight) / steps;
+
+	if (debug)
+		printf("stepping from %0.2f to %0.2f in increments of %d "
+		    "(%d step%s)... ",
+		    tbacklight, new_backlight, step_inc, steps,
+		    (steps == 1 ? "" : "s"));
+
+	for (j = 1; j <= steps; j++) {
+		tbacklight += step_inc;
+
+		if (j == steps)
+			tbacklight = new_backlight;
+
+		if (debug)
+			printf(" %0.2f", tbacklight);
+
+		backlight_op(OP_SET, tbacklight);
+
+		if (j < steps && step_inc < 0)
+			usleep(15000);
+	}
+
+	if (debug)
+		printf("\n");
+}
+
 double
-backlight_op(int set, double new_backlight, int steps)
+backlight_op(int op, double new_backlight)
 {
 	Atom actual_type;
 	int actual_format;
@@ -285,98 +343,97 @@ backlight_op(int set, double new_backlight, int steps)
 	XRRPropertyInfo *info;
 	long value, to;
 	double min, max;
-	int step_inc, i;
+	int i;
 
 	double cur_backlight = -1.0;
 
-	XRRScreenResources *screen_res = XRRGetScreenResources(dpy,
-	    DefaultRootWindow(dpy));
-	if (!screen_res)
-		errx(1, "no screen resources");
+	if (backlight_a == None) {
+#ifdef __OpenBSD__
+		struct wsdisplay_param param;
 
-	for (i = 0; i < screen_res->noutput; i++) {
-		RROutput output = screen_res->outputs[i];
+		param.param = WSDISPLAYIO_PARAM_BRIGHTNESS;
+		if (ioctl(wsconsfd, WSDISPLAYIO_GETPARAM, &param) < 0)
+			errx(1, "ioctl");
 
-		/* yay magic numbers */
+		if (op == OP_SET) {
+			param.curval = (double)(param.max - param.min) *
+				(new_backlight / 100.0);
 
-		if (XRRGetOutputProperty(dpy, output, backlight_a,
-		    0, 4, False, False, None, &actual_type, &actual_format,
-		    &nitems, &bytes_after, &prop) != Success)
-			continue;
+			if (param.curval > param.max)
+				param.curval = param.max;
+			else if (param.curval < param.min)
+				param.curval = param.min;
 
-		if (actual_type != XA_INTEGER || nitems != 1 ||
-		    actual_format != 32) {
-			XFree (prop);
-			continue;
+			if (ioctl(wsconsfd, WSDISPLAYIO_SETPARAM, &param) < 0)
+				errx(1, "ioctl");
 		}
 
-		value = *((long *) prop);
-		XFree(prop);
+		cur_backlight = ((double)param.curval /
+		    (double)(param.max - param.min)) * 100;
+#endif
+	} else {
+		XRRScreenResources *screen_res = XRRGetScreenResources(dpy,
+		    DefaultRootWindow(dpy));
+		if (!screen_res)
+			errx(1, "no screen resources");
 
-		info = XRRQueryOutputProperty(dpy, output, backlight_a);
-		if (!info)
-			continue;
+		for (i = 0; i < screen_res->noutput; i++) {
+			RROutput output = screen_res->outputs[i];
 
-		if (!info->range || info->num_values != 2) {
+			/* yay magic numbers */
+
+			if (XRRGetOutputProperty(dpy, output, backlight_a,
+			    0, 4, False, False, None, &actual_type,
+			    &actual_format, &nitems, &bytes_after,
+			    &prop) != Success)
+				continue;
+
+			if (actual_type != XA_INTEGER || nitems != 1 ||
+			    actual_format != 32) {
+				XFree (prop);
+				continue;
+			}
+
+			value = *((long *) prop);
+			XFree(prop);
+
+			info = XRRQueryOutputProperty(dpy, output, backlight_a);
+			if (!info)
+				continue;
+
+			if (!info->range || info->num_values != 2) {
+				XFree(info);
+				continue;
+			}
+
+			min = info->values[0];
+			max = info->values[1];
 			XFree(info);
-			continue;
-		}
 
-		min = info->values[0];
-		max = info->values[1];
-		XFree(info);
+			/* convert into a percentage */
+			cur_backlight = ((value - min) * 100) / (max - min);
 
-		/* convert into a percentage */
-		cur_backlight = ((value - min) * 100) / (max - min);
-
-		if (set) {
-			int j;
-
-			to = min + ((new_backlight * (max - min)) / 100);
-			if (to < min)
-				to = min;
-			if (to > max)
-				to = max;
-
-			if (to == value)
-				steps = 0;
-			else
-				step_inc = (to - value) / steps;
-
-			if (debug)
-				printf("stepping from %ld to %ld in "
-				    "increments of %d (%d step%s)... ",
-				    value, to, step_inc, steps,
-				    (steps == 1 ? "" : "s"));
-
-			for (j = 1; j <= steps; j++) {
-				value += step_inc;
-
-				if (j == steps)
-					value = to;
-
-				if (debug)
-					printf(" %ld", value);
+			if (op == OP_SET) {
+				to = min + ((new_backlight *
+				    (max - min)) / 100);
+				if (to < min)
+					to = min;
+				if (to > max)
+					to = max;
 
 				XRRChangeOutputProperty(dpy, output,
 				    backlight_a, XA_INTEGER, 32,
 				    PropModeReplace,
 				    (unsigned char *)&value, 1);
 				XSync(dpy, True);
-
-				if (j < steps && step_inc < 0)
-					usleep(15000);
 			}
-
-			if (debug)
-				printf("\n");
+			else
+				/* just return the first screen's backlight */
+				break;
 		}
-		else
-			/* just return the first screen's backlight */
-			break;
-	}
 
-	XRRFreeScreenResources(screen_res);
+		XRRFreeScreenResources(screen_res);
+	}
 
 	return cur_backlight;
 }
