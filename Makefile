@@ -1,9 +1,9 @@
 # vim:ts=8
 
-VERS	:= 1.1
+VERS	:= 1.2
 
 CC	?= cc
-CFLAGS	?= -O2 -Wall -Wunused -Wmissing-prototypes -Wstrict-prototypes
+CFLAGS	?= -O2 -Wall -Wunused -Wmissing-prototypes -Wstrict-prototypes -Wunused
 
 PREFIX	?= /usr/local
 BINDIR	?= $(DESTDIR)$(PREFIX)/bin
