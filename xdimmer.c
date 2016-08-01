@@ -29,6 +29,7 @@
 #include <err.h>
 #include <getopt.h>
 #include <limits.h>
+#include <math.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +40,9 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <dev/wscons/wsconsio.h>
+#include <sys/sysctl.h>
+#include <sys/sensors.h>
+#include <errno.h>
 #endif
 
 #include <X11/X.h>
@@ -58,32 +62,51 @@ enum {
 	OP_SET,
 };
 
+static const struct als_setting {
+	char *label;
+	int min_lux;
+	int backlight;
+	int kbd_backlight;
+} als_settings[] = {
+	{ "dark room", 0, 40, 75 },	/* half screen, lots of keyboard */
+	{ "normal", 5, 65, 0 },		/* no keyboard */
+	{ "sunlight", 400, 100, 0 },	/* sunlight, what's that? */
+};
+
 void xloop(void);
 void set_alarm(XSyncAlarm *, XSyncCounter, XSyncTestType, XSyncValue);
 void dim(void);
 void brighten(void);
 void bail(int);
-void stepper(int, double, double, int);
+void stepper(double, double, int);
 double backlight_op(int, double);
 double kbd_backlight_op(int, double);
+int als_find_sensor(void);
+void als_fetch(void);
 void usage(void);
+Bool XNextEventOrTimeout(Display *, XEvent *, unsigned int);
 
 extern char *__progname;
 
-static Atom backlight_a = 0;
+static double als = -1;
 static double backlight = -1;
-static int dimmed = 0;
+static Atom backlight_a = 0;
 static int debug = 0;
-static int exiting = 0;
 static int dimkbd = 0;
+static int dimmed = 0;
+static int doals = 0;
+static int exiting = 0;
 static double kbd_backlight = -1;
 
 static int dim_timeout = DEFAULT_DIM_TIMEOUT;
 static int dim_pct = DEFAULT_DIM_PERCENTAGE;
 static int dim_steps = DIM_STEPS;
 
+#ifdef __OpenBSD__
 static int wsconsdfd = 0;
 static int wsconskfd = 0;
+int alsmib[5] = { CTL_HW, HW_SENSORS, 0, 0, 0 };
+#endif
 
 static Display *dpy;
 
@@ -92,10 +115,17 @@ main(int argc, char *argv[])
 {
 	int ch;
 
-	while ((ch = getopt(argc, argv, "dkp:s:t:")) != -1) {
+	while ((ch = getopt(argc, argv, "adkp:s:t:")) != -1) {
 		const char *errstr;
 
 		switch (ch) {
+		case 'a':
+#ifndef __OpenBSD__
+			errx(1, "ambient light sensors not supported on this "
+			    "platform");
+#endif
+			doals = 1;
+			break;
 		case 'd':
 			debug = 1;
 			break;
@@ -140,20 +170,15 @@ main(int argc, char *argv[])
 #endif
 			errx(1, "no backlight control");
 	}
-#ifdef __OpenBSD__
-	else if (!dimkbd) {
-		/*
-		 * unfortunately we can't pledge() with wscons interface,
-		 * because the ws*io* ioctls aren't whitelisted
-		 */
-		if (pledge("stdio", NULL) == -1)
-			err(1, "pledge");
-	}
 
+#ifdef __OpenBSD__
 	if (dimkbd)
 		if (!(wsconskfd = open("/dev/wskbd0", O_WRONLY)) ||
 		    kbd_backlight_op(OP_GET, 0) < 0)
 			errx(1, "no keyboard backlight control");
+
+	if (doals && !als_find_sensor())
+		errx(1, "can't find ambient light sensor");
 #endif
 
 	if (debug) {
@@ -205,6 +230,10 @@ xloop(void)
 	XSyncIntToValue(&val, dim_timeout * 1000);
 	set_alarm(&idle_alarm, idler, XSyncPositiveComparison, val);
 
+	backlight = backlight_op(OP_GET, 0);
+	if (dimkbd)
+		kbd_backlight = kbd_backlight_op(OP_GET, 0);
+
 	for (;;) {
 		XEvent e;
 		XSyncAlarmNotifyEvent *alarm_e;
@@ -214,14 +243,19 @@ xloop(void)
 		if (debug)
 			printf("waiting for next event\n");
 
-		XNextEvent(dpy, &e);
-
-		if (debug)
+		/* if we're checking an als, only wait 1 second for x event */
+		XNextEventOrTimeout(dpy, &e, (doals ? 1000 : 0));
+		if (e.type != 0 && debug)
 			printf("got event of type %d\n", e.type);
 
 		if (exiting) {
 			brighten();
 			exit(0);
+		}
+
+		if (e.type == 0 && doals) {
+			als_fetch();
+			continue;
 		}
 
 		if (e.type != sync_event + XSyncAlarmNotify)
@@ -292,13 +326,13 @@ dim(void)
 {
 	backlight = backlight_op(OP_GET, 0);
 	if (dimkbd)
-		kbd_backlight = backlight_op(OP_GET, 0);
+		kbd_backlight = kbd_backlight_op(OP_GET, 0);
 
 	if (backlight > dim_pct) {
 		if (debug)
 			printf("dimming to %d\n", dim_pct);
 
-		stepper(OP_SET, dim_pct, 0, dim_steps);
+		stepper(dim_pct, 0, dim_steps);
 		dimmed = 1;
 	}
 	else if (debug)
@@ -313,7 +347,7 @@ brighten(void)
 		if (debug)
 			printf("brightening back to %f\n", backlight);
 
-		stepper(OP_SET, backlight, kbd_backlight, BRIGHTEN_STEPS);
+		stepper(backlight, kbd_backlight, BRIGHTEN_STEPS);
 	}
 	else if (debug)
 		printf("no previous backlight setting, not brightening\n");
@@ -322,15 +356,13 @@ brighten(void)
 }
 
 void
-stepper(int op, double new_backlight, double new_kbd_backlight, int steps)
+stepper(double new_backlight, double new_kbd_backlight, int steps)
 {
 	double tbacklight = backlight_op(OP_GET, 0);
 	double tkbdbacklight;
 	int step_inc = 0, kbd_step_inc = 0, j;
 
-	if ((int)new_backlight == (int)tbacklight)
-		steps = 0;
-	else
+	if ((int)new_backlight != (int)tbacklight)
 		step_inc = (new_backlight - tbacklight) / steps;
 
 	if (dimkbd) {
@@ -340,6 +372,9 @@ stepper(int op, double new_backlight, double new_kbd_backlight, int steps)
 			kbd_step_inc = (new_kbd_backlight - tkbdbacklight) /
 			    steps;
 	}
+
+	if (step_inc == 0 && kbd_step_inc == 0)
+		return;
 
 	if (debug)
 		printf("stepping from %0.2f to %0.2f in increments of %d "
@@ -485,6 +520,7 @@ backlight_op(int op, double new_backlight)
 double
 kbd_backlight_op(int op, double new_backlight)
 {
+#ifdef __OpenBSD__
 	struct wskbd_backlight param;
 
 	if (ioctl(wsconskfd, WSKBDIO_GETBACKLIGHT, &param) < 0)
@@ -503,14 +539,133 @@ kbd_backlight_op(int op, double new_backlight)
 			errx(1, "ioctl");
 	}
 
-	return ((double)param.curval /
-	    (double)(param.max - param.min)) * 100;
+	return ((double)param.curval / (double)(param.max - param.min)) * 100;
+#else
+	return 0;
+#endif
+}
+
+int
+als_find_sensor(void)
+{
+#ifdef __OpenBSD__
+	struct sensordev sensordev;
+	struct sensor sensor;
+	size_t sdlen, slen;
+	int dev, numt;
+
+	sdlen = sizeof(sensordev);
+	slen = sizeof(sensor);
+
+	for (dev = 0; ; dev++) {
+		alsmib[2] = dev;
+
+		if (sysctl(alsmib, 3, &sensordev, &sdlen, NULL, 0) == -1) {
+			if (errno == ENXIO)
+				continue;
+			else if (errno == ENOENT)
+				break;
+
+			return 0;
+		}
+
+		if (strstr(sensordev.xname, "acpials") == NULL)
+			continue;
+
+		alsmib[3] = SENSOR_LUX;
+
+		for (numt = 0; numt < 1; numt++) {
+			alsmib[4] = numt;
+			if (sysctl(alsmib, 5, &sensor, &slen, NULL, 0) == -1) {
+				if (errno != ENOENT) {
+					warn("sysctl");
+					continue;
+				}
+			}
+
+			if (debug)
+				printf("using als sensor %s\n",
+				    sensordev.xname);
+
+			return 1;
+		}
+	}
+#endif
+
+	return 0;
+}
+
+void
+als_fetch(void)
+{
+	struct sensordev sensordev;
+	struct sensor sensor;
+	size_t sdlen, slen;
+	double lux, tbacklight = backlight, tkbd_backlight = kbd_backlight;
+	int i;
+
+	sdlen = sizeof(sensordev);
+	slen = sizeof(sensor);
+
+	if (sysctl(alsmib, 5, &sensor, &sdlen, NULL, 0) == -1) {
+		warn("sysctl");
+		return;
+	}
+
+	lux = sensor.value / 1000000.0;
+
+	if ((int)als < 0) {
+		als = lux;
+		return;
+	}
+
+	if (abs(lux - als) < 10) {
+		als = lux;
+		return;
+	}
+
+	if (debug)
+		printf("als lux change %f -> %f, screen: %f, kbd: %f\n",
+		    als, lux, backlight, kbd_backlight);
+
+	for (i = (sizeof(als_settings) / sizeof(struct als_setting)) - 1;
+	    i >= 0; i--) {
+		struct als_setting as = als_settings[i];
+
+		if (lux < as.min_lux)
+			continue;
+
+		if (debug)
+			printf("using lux profile %s\n", as.label);
+
+		if (dimkbd && (round(kbd_backlight) != as.kbd_backlight)) {
+			if (debug)
+				printf("adjusting keyboard backlight to %d%\n",
+				    as.kbd_backlight);
+
+			tkbd_backlight = as.kbd_backlight;
+		}
+
+		if (round(backlight) != as.backlight) {
+			if (debug)
+				printf("adjusting screen backlight to %d%\n",
+				    as.backlight);
+
+			tbacklight = as.backlight;
+		}
+
+		stepper(tbacklight, tkbd_backlight, dim_steps);
+
+		break;
+	}
+
+	als = lux;
 }
 
 void
 usage(void)
 {
-	fprintf(stderr, "usage: %s [-d] [-k] [-p dim pct] [-s dim steps] "
+	fprintf(stderr, "usage: %s [-a] [-d] [-k] [-p dim pct] [-s dim steps] "
 	    "[-t timeout secs]\n", __progname);
 	exit(1);
 }
@@ -529,4 +684,29 @@ bail(int sig)
 		exiting = 1;
 	else
 		exit(0);
+}
+
+Bool
+XNextEventOrTimeout(Display *dpy, XEvent *e, unsigned int msecs)
+{
+	int fd;
+	fd_set fdsr;
+	struct timeval tv;
+
+	if (msecs == 0)
+		return XNextEvent(dpy, e);
+
+	if (XPending(dpy) == 0) {
+		fd = ConnectionNumber(dpy);
+		FD_ZERO(&fdsr);
+		FD_SET(fd, &fdsr);
+		tv.tv_sec = msecs / 1000;
+		tv.tv_usec = (msecs % 1000) * 1000;
+		if (select(fd + 1, &fdsr, NULL, NULL, &tv) >= 0) {
+			e->type = 0;
+			return False;
+		}
+	}
+
+	return XNextEvent(dpy, e);
 }

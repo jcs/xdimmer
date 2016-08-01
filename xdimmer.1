@@ -1,11 +1,13 @@
-.Dd $Mdocdate: July 25 2016$
+.Dd $Mdocdate: August 1 2016$
 .Dt XDIMMER 1
 .Os
 .Sh NAME
 .Nm xdimmer
-.Nd dim the screen (and possibly the keyboard) backlight when idle
+.Nd dim the screen (and possibly the keyboard) backlight when idle or when
+ambient light changes
 .Sh SYNOPSIS
 .Nm
+.Op Fl a
 .Op Fl d
 .Op Fl k
 .Op Fl p Ar percent
@@ -29,8 +31,19 @@ On OpenBSD, if the
 option is used, the keyboard backlight is also dimmed and restored via the
 .Xr wscons 4
 interface.
+.Pp
+On OpenBSD, if the
+.Ar -a
+option is used and an ambient light sensor device is located via
+.Xr sysctl 8 ,
+screen backlight (and keyboard backlight if
+.Ar -k
+is used) is dimmed or brightened based on lux readings.
 .Sh OPTIONS
 .Bl -tag -width Ds
+.It Fl a
+Change backlights according to ambient light sensor lux readings.
+Currently only supported on OpenBSD.
 .It Fl d
 Print debugging messages to stdout.
 .It Fl k
