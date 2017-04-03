@@ -94,7 +94,8 @@ static Atom backlight_a = 0;
 static int debug = 0;
 static int dimkbd = 0;
 static int dimmed = 0;
-static int doals = 0;
+static int dimscreen = 1;
+static int useals = 0;
 static int exiting = 0;
 static double kbd_backlight = -1;
 
@@ -115,7 +116,7 @@ main(int argc, char *argv[])
 {
 	int ch;
 
-	while ((ch = getopt(argc, argv, "adkp:s:t:")) != -1) {
+	while ((ch = getopt(argc, argv, "adknp:s:t:")) != -1) {
 		const char *errstr;
 
 		switch (ch) {
@@ -124,7 +125,7 @@ main(int argc, char *argv[])
 			errx(1, "ambient light sensors not supported on this "
 			    "platform");
 #endif
-			doals = 1;
+			useals = 1;
 			break;
 		case 'd':
 			debug = 1;
@@ -135,6 +136,9 @@ main(int argc, char *argv[])
 			    "platform");
 #endif
 			dimkbd = 1;
+			break;
+		case 'n':
+			dimscreen = 0;
 			break;
 		case 'p':
 			dim_pct = strtonum(optarg, 1, 100, &errstr);
@@ -158,17 +162,22 @@ main(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 
+	if (!dimscreen && !dimkbd)
+		errx(1, "not dimming screen or keyboard, nothing to do");
+
 	if (!(dpy = XOpenDisplay(NULL)))
 		errx(1, "can't open display %s", XDisplayName(NULL));
 
-	backlight_a = XInternAtom(dpy, RR_PROPERTY_BACKLIGHT, True);
-	if (backlight_a == None) {
+	if (dimscreen) {
+		backlight_a = XInternAtom(dpy, RR_PROPERTY_BACKLIGHT, True);
+		if (backlight_a == None) {
 #ifdef __OpenBSD__
-		/* see if wscons display.brightness is available */
-		if (!(wsconsdfd = open("/dev/ttyC0", O_WRONLY)) ||
-		    backlight_op(OP_GET, 0) < 0)
+			/* see if wscons display.brightness is available */
+			if (!(wsconsdfd = open("/dev/ttyC0", O_WRONLY)) ||
+			    backlight_op(OP_GET, 0) < 0)
 #endif
-			errx(1, "no backlight control");
+				errx(1, "no backlight control");
+		}
 	}
 
 #ifdef __OpenBSD__
@@ -177,13 +186,14 @@ main(int argc, char *argv[])
 		    kbd_backlight_op(OP_GET, 0) < 0)
 			errx(1, "no keyboard backlight control");
 
-	if (doals && !als_find_sensor())
+	if (useals && !als_find_sensor())
 		errx(1, "can't find ambient light sensor");
 #endif
 
 	if (debug) {
-		printf("dimming screen to %d%% in %d secs\n", dim_pct,
-		    dim_timeout);
+		if (dimscreen)
+			printf("dimming screen to %d%% in %d secs\n", dim_pct,
+			    dim_timeout);
 
 		if (dimkbd)
 			printf("dimming keyboard backlight in %d secs\n",
@@ -230,7 +240,8 @@ xloop(void)
 	XSyncIntToValue(&val, dim_timeout * 1000);
 	set_alarm(&idle_alarm, idler, XSyncPositiveComparison, val);
 
-	backlight = backlight_op(OP_GET, 0);
+	if (dimscreen)
+		backlight = backlight_op(OP_GET, 0);
 	if (dimkbd)
 		kbd_backlight = kbd_backlight_op(OP_GET, 0);
 
@@ -244,7 +255,7 @@ xloop(void)
 			printf("waiting for next event\n");
 
 		/* if we're checking an als, only wait 1 second for x event */
-		XNextEventOrTimeout(dpy, &e, (doals ? 1000 : 0));
+		XNextEventOrTimeout(dpy, &e, (useals ? 1000 : 0));
 		if (e.type != 0 && debug)
 			printf("got event of type %d\n", e.type);
 
@@ -253,7 +264,7 @@ xloop(void)
 			exit(0);
 		}
 
-		if (e.type == 0 && doals) {
+		if (e.type == 0 && useals) {
 			als_fetch();
 			continue;
 		}
@@ -324,18 +335,24 @@ set_alarm(XSyncAlarm *alarm, XSyncCounter counter, XSyncTestType test,
 void
 dim(void)
 {
-	backlight = backlight_op(OP_GET, 0);
+	if (dimscreen)
+		backlight = backlight_op(OP_GET, 0);
 	if (dimkbd)
 		kbd_backlight = kbd_backlight_op(OP_GET, 0);
 
-	if (backlight > dim_pct) {
-		if (debug)
-			printf("dimming to %d\n", dim_pct);
+	if ((dimscreen && (backlight > dim_pct)) ||
+	    (dimkbd && (kbd_backlight > 0))) {
+		if (debug) {
+			if (dimscreen)
+				printf("dimming screen to %d\n", dim_pct);
+			if (dimkbd)
+				printf("dimming keyboard\n");
+		}
 
 		stepper(dim_pct, 0, dim_steps);
 		dimmed = 1;
 	}
-	else if (debug)
+	else if (dimscreen && debug)
 		printf("backlight already at %f, not dimming to %d\n",
 		    backlight, dim_pct);
 }
@@ -343,9 +360,14 @@ dim(void)
 void
 brighten(void)
 {
-	if (backlight > 0) {
-		if (debug)
-			printf("brightening back to %f\n", backlight);
+	if (dimmed) {
+		if (debug) {
+			if (dimscreen)
+				printf("brightening screen back to %f\n",
+				    backlight);
+			if (dimkbd)
+				printf("brightening keyboard\n");
+		}
 
 		stepper(backlight, kbd_backlight, BRIGHTEN_STEPS);
 	}
@@ -358,13 +380,16 @@ brighten(void)
 void
 stepper(double new_backlight, double new_kbd_backlight, int steps)
 {
-	double tbacklight = backlight_op(OP_GET, 0);
-	double tkbdbacklight;
+	double tbacklight = 0;
+	double tkbdbacklight = 0;
 	int step_inc = 0, kbd_step_inc = 0, j;
 
-	if ((int)new_backlight != (int)tbacklight)
-		step_inc = (new_backlight - tbacklight) / steps;
+	if (dimscreen) {
+		tbacklight = backlight_op(OP_GET, 0);
 
+		if ((int)new_backlight != (int)tbacklight)
+			step_inc = (new_backlight - tbacklight) / steps;
+	}
 	if (dimkbd) {
 		tkbdbacklight = kbd_backlight_op(OP_GET, 0);
 
@@ -373,42 +398,45 @@ stepper(double new_backlight, double new_kbd_backlight, int steps)
 			    steps;
 	}
 
-	if (step_inc == 0 && kbd_step_inc == 0)
+	if (!(step_inc || kbd_step_inc))
 		return;
 
-	if (debug)
-		printf("stepping from %0.2f to %0.2f in increments of %d "
-		    "(%d step%s)... ",
-		    tbacklight, new_backlight, step_inc, steps,
-		    (steps == 1 ? "" : "s"));
+	if (debug) {
+		if (dimscreen)
+			printf("stepping from %0.2f to %0.2f in increments "
+			    "of %d (%d step%s)\n",
+			    tbacklight, new_backlight, step_inc, steps,
+			    (steps == 1 ? "" : "s"));
+		if (dimkbd)
+			printf("stepping keyboard from %0.2f to %0.2f in "
+			    "increments of %d (%d step%s)\n",
+			    tkbdbacklight, new_kbd_backlight, kbd_step_inc,
+			    steps, (steps == 1 ? "" : "s"));
+	}
 
 	for (j = 1; j <= steps; j++) {
-		tbacklight += step_inc;
-
+		if (dimscreen)
+			tbacklight += step_inc;
 		if (dimkbd)
 			tkbdbacklight += kbd_step_inc;
 
 		if (j == steps) {
-			tbacklight = new_backlight;
-
+			if (dimscreen)
+				tbacklight = new_backlight;
 			if (dimkbd)
 				tkbdbacklight = new_kbd_backlight;
 		}
 
-		if (debug)
-			printf(" %0.2f", tbacklight);
-
-		backlight_op(OP_SET, tbacklight);
-
+		if (dimscreen)
+			backlight_op(OP_SET, tbacklight);
 		if (dimkbd)
 			kbd_backlight_op(OP_SET, tkbdbacklight);
 
-		if (j < steps && step_inc < 0)
-			usleep(15000);
+		/* only slow down steps if we're dimming */
+		if (j < steps && ((dimscreen && (step_inc < 0)) ||
+		    (dimkbd && (kbd_step_inc < 0))))
+			usleep(25000);
 	}
-
-	if (debug)
-		printf("\n");
 }
 
 double
@@ -432,7 +460,7 @@ backlight_op(int op, double new_backlight)
 
 		param.param = WSDISPLAYIO_PARAM_BRIGHTNESS;
 		if (ioctl(wsconsdfd, WSDISPLAYIO_GETPARAM, &param) < 0)
-			errx(1, "ioctl");
+			err(1, "WSDISPLAYIO_GETPARAM failed");
 
 		if (op == OP_SET) {
 			param.curval = (double)(param.max - param.min) *
@@ -444,7 +472,7 @@ backlight_op(int op, double new_backlight)
 				param.curval = param.min;
 
 			if (ioctl(wsconsdfd, WSDISPLAYIO_SETPARAM, &param) < 0)
-				errx(1, "ioctl");
+				err(1, "WSDISPLAYIO_SETPARAM failed");
 		}
 
 		cur_backlight = ((double)param.curval /
@@ -524,7 +552,7 @@ kbd_backlight_op(int op, double new_backlight)
 	struct wskbd_backlight param;
 
 	if (ioctl(wsconskfd, WSKBDIO_GETBACKLIGHT, &param) < 0)
-		errx(1, "ioctl");
+		err(1, "WSKBDIO_GETBACKLIGHT failed");
 
 	if (op == OP_SET) {
 		param.curval = (double)(param.max - param.min) *
@@ -535,8 +563,8 @@ kbd_backlight_op(int op, double new_backlight)
 		else if (param.curval < param.min)
 			param.curval = param.min;
 
-		if (ioctl(wsconsdfd, WSKBDIO_SETBACKLIGHT, &param) < 0)
-			errx(1, "ioctl");
+		if (ioctl(wsconskfd, WSKBDIO_SETBACKLIGHT, &param) < 0)
+			err(1, "WSKBDIO_SETBACKLIGHT failed");
 	}
 
 	return ((double)param.curval / (double)(param.max - param.min)) * 100;
@@ -569,7 +597,8 @@ als_find_sensor(void)
 			return 0;
 		}
 
-		if (strstr(sensordev.xname, "acpials") == NULL)
+		if (strstr(sensordev.xname, "acpials") == NULL &&
+		   strstr(sensordev.xname, "asmc") == NULL)
 			continue;
 
 		alsmib[3] = SENSOR_LUX;
@@ -640,7 +669,7 @@ als_fetch(void)
 
 		if (dimkbd && (round(kbd_backlight) != as.kbd_backlight)) {
 			if (debug)
-				printf("adjusting keyboard backlight to %d%\n",
+				printf("adjusting keyboard backlight to %d%%\n",
 				    as.kbd_backlight);
 
 			tkbd_backlight = as.kbd_backlight;
@@ -648,7 +677,7 @@ als_fetch(void)
 
 		if (round(backlight) != as.backlight) {
 			if (debug)
-				printf("adjusting screen backlight to %d%\n",
+				printf("adjusting screen backlight to %d%%\n",
 				    as.backlight);
 
 			tbacklight = as.backlight;
@@ -665,7 +694,7 @@ als_fetch(void)
 void
 usage(void)
 {
-	fprintf(stderr, "usage: %s [-a] [-d] [-k] [-p dim pct] [-s dim steps] "
+	fprintf(stderr, "usage: %s [-adkn] [-p dim pct] [-s dim steps] "
 	    "[-t timeout secs]\n", __progname);
 	exit(1);
 }
