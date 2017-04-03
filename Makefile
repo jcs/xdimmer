@@ -28,6 +28,9 @@ $(PROG): $(OBJS)
 $(OBJS): *.c
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
+README.md: xdimmer.1
+	mandoc -T markdown xdimmer.1 > README.md
+
 install: all
 	mkdir -p $(BINDIR)
 	$(INSTALL_PROGRAM) $(PROG) $(BINDIR)
@@ -39,7 +42,7 @@ clean:
 
 release: all
 	@mkdir $(PROG)-${VERS}
-	@cp Makefile *.c $(PROG)-$(VERS)/
+	@cp Makefile README.md *.c $(PROG)-$(VERS)/
 	@tar -czf ../$(PROG)-$(VERS).tar.gz $(PROG)-$(VERS)
 	@rm -rf $(PROG)-$(VERS)/
 	@echo "made release ${VERS}"
