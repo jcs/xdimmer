@@ -68,9 +68,16 @@ static const struct als_setting {
 	int backlight;
 	int kbd_backlight;
 } als_settings[] = {
-	{ "dark room", 0, 40, 75 },	/* half screen, lots of keyboard */
-	{ "normal", 5, 65, 0 },		/* no keyboard */
-	{ "sunlight", 400, 100, 0 },	/* sunlight, what's that? */
+	/* scene	      min lux  screen  kbd */
+	{ "pitch black",	   0,	 20,	80 },
+	{ "very dark",		  11,	 30,	70 },
+	{ "dark indoors",	  51,	 40,	60 },
+	{ "dim indoors",	 201,	 50,	50 },
+	{ "normal indoors",	 401,	 60,	40 },
+	{ "bright indoors",	1001,	 70,	30 },
+	{ "dim outdoors",	5001,	 80,	20 },
+	{ "cloudy outdoors",   10001,	 90,	10 },
+	{ "sunlight",	       30001,	100,	 0 },
 };
 
 void xloop(void);
