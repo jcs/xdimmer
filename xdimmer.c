@@ -545,7 +545,7 @@ backlight_op(int op, double new_backlight)
 				XRRChangeOutputProperty(dpy, output,
 				    backlight_a, XA_INTEGER, 32,
 				    PropModeReplace,
-				    (unsigned char *)&value, 1);
+				    (unsigned char *)&to, 1);
 				XSync(dpy, True);
 			}
 			else
