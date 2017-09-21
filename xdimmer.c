@@ -389,7 +389,8 @@ stepper(double new_backlight, double new_kbd_backlight, int steps)
 {
 	double tbacklight = 0;
 	double tkbdbacklight = 0;
-	int step_inc = 0, kbd_step_inc = 0, j;
+	double step_inc = 0, kbd_step_inc = 0;
+	int j;
 
 	if (dimscreen) {
 		tbacklight = backlight_op(OP_GET, 0);
@@ -411,12 +412,12 @@ stepper(double new_backlight, double new_kbd_backlight, int steps)
 	if (debug) {
 		if (dimscreen)
 			printf("stepping from %0.2f to %0.2f in increments "
-			    "of %d (%d step%s)\n",
+			    "of %f (%d step%s)\n",
 			    tbacklight, new_backlight, step_inc, steps,
 			    (steps == 1 ? "" : "s"));
 		if (dimkbd)
 			printf("stepping keyboard from %0.2f to %0.2f in "
-			    "increments of %d (%d step%s)\n",
+			    "increments of %f (%d step%s)\n",
 			    tkbdbacklight, new_kbd_backlight, kbd_step_inc,
 			    steps, (steps == 1 ? "" : "s"));
 	}
@@ -465,6 +466,9 @@ backlight_op(int op, double new_backlight)
 #ifdef __OpenBSD__
 		struct wsdisplay_param param;
 
+		if (debug)
+			printf("%s (wscons): %f\n", __func__, new_backlight);
+
 		param.param = WSDISPLAYIO_PARAM_BRIGHTNESS;
 		if (ioctl(wsconsdfd, WSDISPLAYIO_GETPARAM, &param) < 0)
 			err(1, "WSDISPLAYIO_GETPARAM failed");
@@ -486,6 +490,9 @@ backlight_op(int op, double new_backlight)
 		    (double)(param.max - param.min)) * 100;
 #endif
 	} else {
+		if (debug)
+			printf("%s (xrandr): %f\n", __func__, new_backlight);
+
 		XRRScreenResources *screen_res = XRRGetScreenResources(dpy,
 		    DefaultRootWindow(dpy));
 		if (!screen_res)
@@ -562,6 +569,9 @@ kbd_backlight_op(int op, double new_backlight)
 		err(1, "WSKBDIO_GETBACKLIGHT failed");
 
 	if (op == OP_SET) {
+		if (debug)
+			printf("%s: %f\n", __func__, new_backlight);
+
 		param.curval = (double)(param.max - param.min) *
 			(new_backlight / 100.0);
 
@@ -655,7 +665,7 @@ als_fetch(void)
 		return;
 	}
 
-	if (abs(lux - als) < 10) {
+	if (abs((int)lux - (int)als) < 10) {
 		als = lux;
 		return;
 	}
