@@ -76,7 +76,7 @@ is used) is dimmed or brightened based on lux readings.
 > `10`
 > percent.
 
-**-t** *steps*
+**-s** *steps*
 
 > Number of steps to take while decrementing backlight.
 > The default is
@@ -96,4 +96,4 @@ is used) is dimmed or brightened based on lux readings.
 was written by
 joshua stein &lt;[jcs@jcs.org](mailto:jcs@jcs.org)&gt;.
 
-OpenBSD 6.1 - April 2, 2017
+OpenBSD 6.2 - September 21, 2017
