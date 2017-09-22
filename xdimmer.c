@@ -1,6 +1,6 @@
 /*
  * xdimmer
- * Copyright (c) 2013-2016 joshua stein <jcs@jcs.org>
+ * Copyright (c) 2013-2017 joshua stein <jcs@jcs.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -242,8 +242,10 @@ xloop(void)
 	if (!idler)
 		errx(1, "no idle counter");
 
-	/* fire an XSyncAlarmNotifyEvent when idletime counter reaches our
-	 * dim_timeout seconds */
+	/*
+	 * fire an XSyncAlarmNotifyEvent when idletime counter reaches our
+	 * dim_timeout seconds
+	 */
 	XSyncIntToValue(&val, dim_timeout * 1000);
 	set_alarm(&idle_alarm, idler, XSyncPositiveComparison, val);
 
@@ -284,17 +286,30 @@ xloop(void)
 		if (alarm_e->alarm == idle_alarm) {
 			if (debug)
 				printf("idle counter reached %dms\n",
-					XSyncValueLow32(alarm_e->counter_value));
+				    XSyncValueLow32(alarm_e->counter_value));
 
 			XSyncDestroyAlarm(dpy, idle_alarm);
 			idle_alarm = None;
 
-			dim();
-
-			/* fire reset_alarm when idletime counter resets */
+			/*
+			 * fire reset_alarm when idletime counter resets, but
+			 * set it up before dimming so we can break from
+			 * dimming early if movement is detected
+			 */
+			if (reset_alarm != None) {
+				XSyncDestroyAlarm(dpy, reset_alarm);
+				reset_alarm = None;
+			}
 			XSyncIntToValue(&add, -1);
 			XSyncValueAdd(&plusone, alarm_e->counter_value, add,
 			    &overflow);
+			set_alarm(&reset_alarm, idler, XSyncNegativeComparison,
+			    plusone);
+
+			dim();
+
+			XSyncDestroyAlarm(dpy, reset_alarm);
+			reset_alarm = None;
 			set_alarm(&reset_alarm, idler, XSyncNegativeComparison,
 			    plusone);
 		}
@@ -443,7 +458,15 @@ stepper(double new_backlight, double new_kbd_backlight, int steps)
 		/* only slow down steps if we're dimming */
 		if (j < steps && ((dimscreen && (step_inc < 0)) ||
 		    (dimkbd && (kbd_step_inc < 0))))
-			usleep(25000);
+			usleep(steps > 50 ? 10000 : 25000);
+
+		if (XPending(dpy) > 0) {
+			if (debug)
+				printf("%s: event while stepping, breaking "
+				    "early\n", __func__);
+
+			return;
+		}
 	}
 }
 
