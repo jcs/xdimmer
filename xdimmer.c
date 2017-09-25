@@ -91,7 +91,7 @@ double kbd_backlight_op(int, double);
 int als_find_sensor(void);
 void als_fetch(void);
 void usage(void);
-Bool XNextEventOrTimeout(Display *, XEvent *, unsigned int);
+int XNextEventOrTimeout(Display *, XEvent *, unsigned int);
 
 extern char *__progname;
 
@@ -437,7 +437,12 @@ stepper(double new_backlight, double new_kbd_backlight, int steps)
 			    steps, (steps == 1 ? "" : "s"));
 	}
 
+	/* discard any stale events */
+	XSync(dpy, True);
+
 	for (j = 1; j <= steps; j++) {
+		XEvent e;
+
 		if (dimscreen)
 			tbacklight += step_inc;
 		if (dimkbd)
@@ -460,10 +465,10 @@ stepper(double new_backlight, double new_kbd_backlight, int steps)
 		    (dimkbd && (kbd_step_inc < 0))))
 			usleep(steps > 50 ? 10000 : 25000);
 
-		if (XPending(dpy) > 0) {
+		if (XNextEventOrTimeout(dpy, &e, 1) && e.type != 0) {
 			if (debug)
-				printf("%s: event while stepping, breaking "
-				    "early\n", __func__);
+				printf("%s: %d event while stepping, breaking "
+				    "early\n", __func__, e.type);
 
 			return;
 		}
@@ -755,15 +760,17 @@ bail(int sig)
 		exit(0);
 }
 
-Bool
+int
 XNextEventOrTimeout(Display *dpy, XEvent *e, unsigned int msecs)
 {
 	int fd;
 	fd_set fdsr;
 	struct timeval tv;
 
-	if (msecs == 0)
-		return XNextEvent(dpy, e);
+	if (msecs == 0) {
+		XNextEvent(dpy, e);
+		return 1;
+	}
 
 	if (XPending(dpy) == 0) {
 		fd = ConnectionNumber(dpy);
@@ -773,9 +780,10 @@ XNextEventOrTimeout(Display *dpy, XEvent *e, unsigned int msecs)
 		tv.tv_usec = (msecs % 1000) * 1000;
 		if (select(fd + 1, &fdsr, NULL, NULL, &tv) >= 0) {
 			e->type = 0;
-			return False;
+			return 0;
 		}
 	}
 
-	return XNextEvent(dpy, e);
+	XNextEvent(dpy, e);
+	return 1;
 }
