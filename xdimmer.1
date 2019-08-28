@@ -1,4 +1,4 @@
-.Dd $Mdocdate: September 21 2017$
+.Dd $Mdocdate: August 27 2019$
 .Dt XDIMMER 1
 .Os
 .Sh NAME
@@ -8,11 +8,12 @@ light changes
 .Sh SYNOPSIS
 .Nm
 .Op Fl a
+.Op Fl b Ar brighten steps
 .Op Fl d
 .Op Fl k
 .Op Fl n
 .Op Fl p Ar percent
-.Op Fl s Ar steps
+.Op Fl s Ar dim steps
 .Op Fl t Ar timeout
 .Sh DESCRIPTION
 .Nm
@@ -22,12 +23,14 @@ number of seconds and if no keyboard or mouse input is detected, the screen
 backlight is dimmed to
 .Ar percent
 in
-.Ar steps
+.Ar dim steps
 steps, unless the
 .Ar -n
 option was specified.
 Once keyboard or mouse input is detected, the screen backlight is restored
-to its previous brightness value.
+to its previous brightness value in
+.Ar brighten steps
+steps.
 .Pp
 On OpenBSD, if the
 .Ar -k
@@ -48,6 +51,11 @@ is used) is dimmed or brightened based on lux readings.
 .It Fl a
 Change backlights according to ambient light sensor lux readings.
 Currently only supported on OpenBSD.
+.It Fl b Ar steps
+Number of steps to take while restoring backlight.
+The default is
+.Dv 5
+steps.
 .It Fl d
 Print debugging messages to stdout.
 .It Fl k

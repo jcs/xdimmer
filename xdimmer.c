@@ -111,6 +111,7 @@ static float kbd_backlight = -1;
 static int dim_timeout = DEFAULT_DIM_TIMEOUT;
 static int dim_pct = DEFAULT_DIM_PERCENTAGE;
 static int dim_steps = DEFAULT_DIM_STEPS;
+static int brighten_steps = DEFAULT_BRIGHTEN_STEPS;
 
 static Atom backlight_a = 0;
 static XSyncCounter idler_counter = 0;
@@ -131,7 +132,7 @@ main(int argc, char *argv[])
 {
 	int ch;
 
-	while ((ch = getopt(argc, argv, "adknp:s:t:")) != -1) {
+	while ((ch = getopt(argc, argv, "ab:dknp:s:t:")) != -1) {
 		const char *errstr;
 
 		switch (ch) {
@@ -141,6 +142,11 @@ main(int argc, char *argv[])
 			    "platform");
 #endif
 			use_als = 1;
+			break;
+		case 'b':
+			brighten_steps = strtonum(optarg, 1, 100, &errstr);
+			if (errstr)
+				errx(2, "brighten steps: %s", errstr);
 			break;
 		case 'd':
 			debug = 1;
@@ -314,15 +320,14 @@ xloop(void)
 			set_alarm(&idle_alarm, XSyncPositiveComparison,
 			    dim_timeout * 1000);
 
-			stepper(backlight, kbd_backlight, DEFAULT_BRIGHTEN_STEPS,
-			    0);
+			stepper(backlight, kbd_backlight, brighten_steps, 0);
 			dimmed = 0;
 		}
 	}
 
 	DPRINTF(("restoring backlight to %f / %f before exiting\n", backlight,
 	    kbd_backlight));
-	stepper(backlight, kbd_backlight, 1, 0);
+	stepper(backlight, kbd_backlight, brighten_steps, 0);
 }
 
 void
@@ -677,8 +682,8 @@ als_fetch(void)
 void
 usage(void)
 {
-	fprintf(stderr, "usage: %s [-adkn] [-p dim pct] [-s dim steps] "
-	    "[-t timeout secs]\n", __progname);
+	fprintf(stderr, "usage: %s [-adkn] [-b brighten steps] [-p dim pct] "
+	    "[-s dim steps] [-t timeout secs]\n", __progname);
 	exit(1);
 }
 
