@@ -290,6 +290,11 @@ xloop(void)
 			set_alarm(&reset_alarm, XSyncNegativeComparison,
 			    (dim_timeout * 1000) - 1);
 
+			if (dim_screen)
+				backlight = backlight_op(OP_GET, 0);
+			if (dim_kbd)
+				kbd_backlight = kbd_backlight_op(OP_GET, 0);
+
 			stepper(dim_pct, 0, dim_steps, 1);
 			dimmed = 1;
 
@@ -297,7 +302,7 @@ xloop(void)
 			    (dim_timeout * 1000) - 1);
 		}
 		else if (alarm_e->alarm == reset_alarm) {
-			DPRINTF(("idle counter reset\n"));
+			DPRINTF(("idle counter reset, brightening\n"));
 
 			if (use_als)
 				als_fetch();
@@ -311,6 +316,8 @@ xloop(void)
 		}
 	}
 
+	DPRINTF(("restoring backlight to %f / %f before exiting\n", backlight,
+	    kbd_backlight));
 	stepper(backlight, kbd_backlight, 1, 0);
 }
 
@@ -342,15 +349,13 @@ stepper(float new_backlight, float new_kbd_backlight, int steps, int inter)
 	int j;
 
 	if (dim_screen) {
-		tbacklight = backlight = backlight_op(OP_GET, 0);
-
+		tbacklight = backlight_op(OP_GET, 0);
 		if (((int)new_backlight != (int)tbacklight))
 			step_inc = (new_backlight - tbacklight) / steps;
 	}
 
 	if (dim_kbd) {
-		kbd_backlight = tkbd_backlight = kbd_backlight_op(OP_GET, 0);
-
+		tkbd_backlight = kbd_backlight_op(OP_GET, 0);
 		if ((int)new_kbd_backlight != (int)tkbd_backlight)
 			kbd_step_inc = (new_kbd_backlight - tkbd_backlight) /
 			    steps;
@@ -529,7 +534,7 @@ kbd_backlight_op(int op, float new_backlight)
 		DPRINTF(("%s: %f\n", __func__, new_backlight));
 
 		param.curval = (float)(param.max - param.min) *
-			(new_backlight / 100.0);
+		    (new_backlight / 100.0);
 
 		if (param.curval > param.max)
 			param.curval = param.max;
