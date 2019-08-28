@@ -91,6 +91,7 @@ int als_find_sensor(void);
 void als_fetch(void);
 void usage(void);
 int XPeekEventOrTimeout(Display *, XEvent *, unsigned int);
+int exitmsg[2];
 
 extern char *__progname;
 
@@ -216,6 +217,9 @@ main(int argc, char *argv[])
 	signal(SIGINT, bail);
 	signal(SIGTERM, bail);
 
+	/* setup a pipe to wait for an exit message from bail() */
+	pipe(exitmsg);
+
 	xloop();
 
 	return 0;
@@ -258,9 +262,6 @@ xloop(void)
 		XEvent e;
 		XSyncAlarmNotifyEvent *alarm_e;
 
-		if (exiting)
-			break;
-
 		DPRINTF(("waiting for next event\n"));
 
 		/* if we're checking an als, only wait 1 second for x event */
@@ -269,6 +270,9 @@ xloop(void)
 				als_fetch();
 			continue;
 		}
+
+		if (exiting)
+			break;
 
 		XNextEvent(dpy, &e);
 
@@ -684,35 +688,47 @@ bail(int sig)
 	if (exiting)
 		exit(0);
 
+	/*
+	 * Doing X ops inside a signal handler causes an infinite loop in
+	 * _XReply/xcb, so we can't properly brighten and exit ourselves.
+	 * write to the pipe setup earlier so our event loop will see it upon
+	 * polling.
+	 */
 	DPRINTF(("got signal %d, trying to exit\n", sig));
-
-	/* XXX: doing X ops inside a signal handler causes an infinite loop in
-	 * _XReply/xcb, so we can't properly brighten() and exit, so we just
-	 * set a flag and wait for the next time our idle counter stuff happens
-	 * so we can exit there */
-	if (dimmed)
-		exiting = 1;
-	else
-		exit(0);
+	write(exitmsg[1], &exitmsg, 1);
+	exiting = 1;
 }
 
 int
 XPeekEventOrTimeout(Display *dpy, XEvent *e, unsigned int msecs)
 {
-	struct pollfd pfd[1];
+	struct pollfd pfd[2];
 
-	if (!XPending(dpy)) {
+	while (!XPending(dpy)) {
 		memset(&pfd, 0, sizeof(pfd));
 		pfd[0].fd = ConnectionNumber(dpy);
 		pfd[0].events = POLLIN;
+		pfd[1].fd = exitmsg[0];
+		pfd[1].events = POLLIN;
 
-		if (poll(pfd, 1, msecs == 0 ? INFTIM : msecs) == 0)
+		switch (poll(pfd, 2, msecs == 0 ? INFTIM : msecs)) {
+		case -1:
+			/* signal, maybe exit handler, we'll loop again */
+			DPRINTF(("poll returned -1 for errno %d\n", errno));
+			break;
+		case 0:
+			/* timed out */
 			return 0;
-
-		if (pfd[0].revents) {
-			DPRINTF(("%s: got X event\n", __func__));
-			XPeekEvent(dpy, e);
-			return 1;
+		default:
+			if (pfd[1].revents) {
+				DPRINTF(("%s: got exit message\n", __func__));
+				exiting = 1;
+				return 1;
+			} else if (pfd[0].revents) {
+				DPRINTF(("%s: got X event\n", __func__));
+				XPeekEvent(dpy, e);
+				return 1;
+			}
 		}
 	}
 
