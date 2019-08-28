@@ -1,6 +1,6 @@
 /*
  * xdimmer
- * Copyright (c) 2013-2017 joshua stein <jcs@jcs.org>
+ * Copyright (c) 2013-2019 joshua stein <jcs@jcs.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -30,6 +30,7 @@
 #include <getopt.h>
 #include <limits.h>
 #include <math.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,8 +55,8 @@
 #define DEFAULT_DIM_TIMEOUT	120
 #define DEFAULT_DIM_PERCENTAGE	10
 
-#define DIM_STEPS		20
-#define BRIGHTEN_STEPS		5
+#define DEFAULT_DIM_STEPS	20
+#define DEFAULT_BRIGHTEN_STEPS	5
 
 enum {
 	OP_GET,
@@ -68,7 +69,7 @@ static const struct als_setting {
 	int backlight;
 	int kbd_backlight;
 } als_settings[] = {
-	/* scene	      min lux  screen  kbd */
+	/* scene	     min lux screen    kbd */
 	{ "pitch black",	   0,	 20,	80 },
 	{ "very dark",		  11,	 30,	70 },
 	{ "dark indoors",	  51,	 40,	60 },
@@ -81,36 +82,40 @@ static const struct als_setting {
 };
 
 void xloop(void);
-void set_alarm(XSyncAlarm *, XSyncCounter, XSyncTestType, XSyncValue);
-void dim(void);
-void brighten(void);
+void set_alarm(XSyncAlarm *, XSyncTestType, unsigned long);
 void bail(int);
-void stepper(double, double, int);
-double backlight_op(int, double);
-double kbd_backlight_op(int, double);
+void stepper(float, float, int, int);
+float backlight_op(int, float);
+float kbd_backlight_op(int, float);
 int als_find_sensor(void);
 void als_fetch(void);
 void usage(void);
-int XNextEventOrTimeout(Display *, XEvent *, unsigned int);
+int XPeekEventOrTimeout(Display *, XEvent *, unsigned int);
 
 extern char *__progname;
 
-static double als = -1;
-static double backlight = -1;
-static Atom backlight_a = 0;
-static int dimkbd = 0;
+/* options */
+static int dim_kbd = 0;
 static int dimmed = 0;
-static int dimscreen = 1;
-static int useals = 0;
-static int exiting = 0;
-static double kbd_backlight = -1;
+static int dim_screen = 1;
+static int use_als = 0;
 
-static int debug = 0;
-#define DPRINTF(x) { if (debug) { printf x; } };
+/* ALS reading */
+static float als = -1;
+
+/* backlight reading and target while dimming/undimming */
+static float backlight = -1;
+static float kbd_backlight = -1;
 
 static int dim_timeout = DEFAULT_DIM_TIMEOUT;
 static int dim_pct = DEFAULT_DIM_PERCENTAGE;
-static int dim_steps = DIM_STEPS;
+static int dim_steps = DEFAULT_DIM_STEPS;
+
+static Atom backlight_a = 0;
+static XSyncCounter idler_counter = 0;
+static int exiting = 0;
+static int debug = 0;
+#define DPRINTF(x) { if (debug) { printf x; } };
 
 #ifdef __OpenBSD__
 static int wsconsdfd = 0;
@@ -134,7 +139,7 @@ main(int argc, char *argv[])
 			errx(1, "ambient light sensors not supported on this "
 			    "platform");
 #endif
-			useals = 1;
+			use_als = 1;
 			break;
 		case 'd':
 			debug = 1;
@@ -144,10 +149,10 @@ main(int argc, char *argv[])
 			errx(1, "keyboard backlight not supported on this "
 			    "platform");
 #endif
-			dimkbd = 1;
+			dim_kbd = 1;
 			break;
 		case 'n':
-			dimscreen = 0;
+			dim_screen = 0;
 			break;
 		case 'p':
 			dim_pct = strtonum(optarg, 1, 100, &errstr);
@@ -171,13 +176,13 @@ main(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 
-	if (!dimscreen && !dimkbd && !useals)
+	if (!dim_screen && !dim_kbd && !use_als)
 		errx(1, "not dimming screen or keyboard, nothing to do");
 
 	if (!(dpy = XOpenDisplay(NULL)))
 		errx(1, "can't open display %s", XDisplayName(NULL));
 
-	if (dimscreen || useals) {
+	if (dim_screen || use_als) {
 		backlight_a = XInternAtom(dpy, RR_PROPERTY_BACKLIGHT, True);
 		if (backlight_a == None) {
 #ifdef __OpenBSD__
@@ -190,22 +195,22 @@ main(int argc, char *argv[])
 	}
 
 #ifdef __OpenBSD__
-	if (dimkbd)
+	if (dim_kbd)
 		if (!(wsconskfd = open("/dev/wskbd0", O_WRONLY)) ||
 		    kbd_backlight_op(OP_GET, 0) < 0)
 			errx(1, "no keyboard backlight control");
 
-	if (useals && !als_find_sensor())
+	if (use_als && !als_find_sensor())
 		errx(1, "can't find ambient light sensor");
 #endif
 
-	if (dimscreen)
+	if (dim_screen)
 		DPRINTF(("dimming screen to %d%% in %d secs\n", dim_pct,
 		    dim_timeout));
-	if (dimkbd)
+	if (dim_kbd)
 		DPRINTF(("dimming keyboard backlight in %d secs\n",
 		    dim_timeout));
-	if (useals)
+	if (use_als)
 		DPRINTF(("automatically updating brightness from ALS\n"));
 
 	signal(SIGINT, bail);
@@ -213,7 +218,7 @@ main(int argc, char *argv[])
 
 	xloop();
 
-	return (0);
+	return 0;
 }
 
 void
@@ -222,66 +227,55 @@ xloop(void)
 	XSyncSystemCounter *counters;
 	XSyncAlarm idle_alarm = None;
 	XSyncAlarm reset_alarm = None;
-	XSyncValue val;
 	int sync_event, error;
-	int sync_major, sync_minor, ncounters, idler = 0;
+	int major, minor, ncounters;
 	int i;
 
 	if (XSyncQueryExtension(dpy, &sync_event, &error) != True)
 		errx(1, "no sync extension available");
 
-	XSyncInitialize(dpy, &sync_major, &sync_minor);
+	XSyncInitialize(dpy, &major, &minor);
 
 	counters = XSyncListSystemCounters(dpy, &ncounters);
-	for (i = 0; i < ncounters; i++)
+	for (i = 0; i < ncounters; i++) {
 		if (!strcmp(counters[i].name, "IDLETIME")) {
-			idler = counters[i].counter;
+			idler_counter = counters[i].counter;
 			break;
 		}
+	}
 	XSyncFreeSystemCounterList(counters);
 
-	if (!idler)
+	if (!idler_counter)
 		errx(1, "no idle counter");
 
 	/*
-	 * fire an XSyncAlarmNotifyEvent when idletime counter reaches our
+	 * fire an XSyncAlarmNotifyEvent when IDLETIME counter reaches
 	 * dim_timeout seconds
 	 */
-	XSyncIntToValue(&val, dim_timeout * 1000);
-	set_alarm(&idle_alarm, idler, XSyncPositiveComparison, val);
-
-	if (dimscreen || useals)
-		backlight = backlight_op(OP_GET, 0);
-	if (dimkbd)
-		kbd_backlight = kbd_backlight_op(OP_GET, 0);
+	set_alarm(&idle_alarm, XSyncPositiveComparison, dim_timeout * 1000);
 
 	for (;;) {
 		XEvent e;
 		XSyncAlarmNotifyEvent *alarm_e;
-		int overflow;
-		XSyncValue add, plusone;
 
-		if (exiting) {
-			brighten();
-			exit(0);
-		}
+		if (exiting)
+			break;
 
 		DPRINTF(("waiting for next event\n"));
 
 		/* if we're checking an als, only wait 1 second for x event */
-		XNextEventOrTimeout(dpy, &e, (useals ? 1000 : 0));
-
-		if (e.type == 0) {
-			if (useals && !dimmed)
+		if (XPeekEventOrTimeout(dpy, &e, (use_als ? 1000 : 0)) == 0) {
+			if (use_als && !dimmed)
 				als_fetch();
-
 			continue;
 		}
 
-		if (!dimscreen && !dimkbd)
+		XNextEvent(dpy, &e);
+
+		if (!dim_screen && !dim_kbd)
 			continue;
 
-		if (e.type != sync_event + XSyncAlarmNotify) {
+		if (e.type != (sync_event + XSyncAlarmNotify)) {
 			DPRINTF(("got event of type %d\n", e.type));
 			continue;
 		}
@@ -289,191 +283,131 @@ xloop(void)
 		alarm_e = (XSyncAlarmNotifyEvent *)&e;
 
 		if (alarm_e->alarm == idle_alarm) {
-			DPRINTF(("idle counter reached %dms\n",
+			DPRINTF(("idle counter reached %dms, dimming\n",
 			    XSyncValueLow32(alarm_e->counter_value)));
 
-			XSyncDestroyAlarm(dpy, idle_alarm);
-			idle_alarm = None;
+			/* fire reset_alarm when idle counter resets */
+			set_alarm(&reset_alarm, XSyncNegativeComparison,
+			    (dim_timeout * 1000) - 1);
 
-			/*
-			 * fire reset_alarm when idletime counter resets, but
-			 * set it up before dimming so we can break from
-			 * dimming early if movement is detected
-			 */
-			if (reset_alarm != None) {
-				XSyncDestroyAlarm(dpy, reset_alarm);
-				reset_alarm = None;
-			}
-			XSyncIntToValue(&add, -1);
-			XSyncValueAdd(&plusone, alarm_e->counter_value, add,
-			    &overflow);
-			set_alarm(&reset_alarm, idler, XSyncNegativeComparison,
-			    plusone);
+			if (dim_screen)
+				backlight = backlight_op(OP_GET, 0);
+			if (dim_kbd)
+				kbd_backlight = kbd_backlight_op(OP_GET, 0);
 
-			dim();
+			stepper(dim_pct, 0, dim_steps, 1);
+			dimmed = 1;
 
-			XSyncDestroyAlarm(dpy, reset_alarm);
-			reset_alarm = None;
-			set_alarm(&reset_alarm, idler, XSyncNegativeComparison,
-			    plusone);
+			set_alarm(&reset_alarm, XSyncNegativeComparison,
+			    (dim_timeout * 1000) - 1);
 		}
 		else if (alarm_e->alarm == reset_alarm) {
-			DPRINTF(("idle counter reset\n"));
+			DPRINTF(("idle counter reset, brightening\n"));
 
-			XSyncDestroyAlarm(dpy, reset_alarm);
-			reset_alarm = None;
-
-			if (useals)
+			if (use_als)
 				als_fetch();
 
-			brighten();
+			set_alarm(&idle_alarm, XSyncPositiveComparison,
+			    dim_timeout * 1000);
 
-			XSyncIntToValue(&val, dim_timeout * 1000);
-			set_alarm(&idle_alarm, idler, XSyncPositiveComparison,
-			    val);
+			stepper(backlight, kbd_backlight, DEFAULT_BRIGHTEN_STEPS,
+			    0);
+			dimmed = 0;
 		}
 	}
+
+	DPRINTF(("restoring backlight to %f / %f before exiting\n", backlight,
+	    kbd_backlight));
+	stepper(backlight, kbd_backlight, 1, 0);
 }
 
 void
-set_alarm(XSyncAlarm *alarm, XSyncCounter counter, XSyncTestType test,
-    XSyncValue value)
+set_alarm(XSyncAlarm *alarm, XSyncTestType test, unsigned long seconds)
 {
 	XSyncAlarmAttributes attr;
-	XSyncValue delta;
 	unsigned int flags;
 
-	XSyncIntToValue (&delta, 0);
-
-	attr.trigger.counter = counter;
+	attr.trigger.counter = idler_counter;
 	attr.trigger.value_type = XSyncAbsolute;
 	attr.trigger.test_type = test;
-	attr.trigger.wait_value = value;
-	attr.delta = delta;
+	XSyncIntToValue(&attr.trigger.wait_value, seconds);
+	XSyncIntToValue(&attr.delta, 0);
 
-	flags = XSyncCACounter | XSyncCAValueType | XSyncCATestType |
-	    XSyncCAValue | XSyncCADelta;
+	flags = XSyncCACounter | XSyncCATestType | XSyncCAValue | XSyncCADelta;
 
 	if (*alarm)
-		XSyncChangeAlarm(dpy, *alarm, flags, &attr);
-	else
-		*alarm = XSyncCreateAlarm(dpy, flags, &attr);
+		XSyncDestroyAlarm(dpy, *alarm);
+
+	*alarm = XSyncCreateAlarm(dpy, flags, &attr);
 }
 
 void
-dim(void)
+stepper(float new_backlight, float new_kbd_backlight, int steps, int inter)
 {
-	if (dimscreen)
-		backlight = backlight_op(OP_GET, 0);
-	if (dimkbd)
-		kbd_backlight = kbd_backlight_op(OP_GET, 0);
-
-	if (((dimscreen || useals) && (backlight > dim_pct)) ||
-	    (dimkbd && (kbd_backlight > 0))) {
-		if (dimscreen)
-			DPRINTF(("dimming screen to %d\n", dim_pct));
-		if (dimkbd)
-			DPRINTF(("dimming keyboard\n"));
-
-		stepper(dim_pct, 0, dim_steps);
-		dimmed = 1;
-	}
-	else if (dimscreen)
-		DPRINTF(("backlight already at %f, not dimming to %d\n",
-		    backlight, dim_pct));
-}
-
-void
-brighten(void)
-{
-	if (dimmed) {
-		if (dimscreen || useals)
-			DPRINTF(("brightening screen back to %f\n", backlight));
-		if (dimkbd)
-			DPRINTF(("brightening keyboard\n"));
-
-		stepper(backlight, kbd_backlight, BRIGHTEN_STEPS);
-	}
-	else
-		DPRINTF(("no previous backlight setting, not brightening\n"));
-
-	dimmed = 0;
-}
-
-void
-stepper(double new_backlight, double new_kbd_backlight, int steps)
-{
-	double tbacklight = 0;
-	double tkbdbacklight = 0;
-	double step_inc = 0, kbd_step_inc = 0;
+	float tbacklight, tkbd_backlight;
+	float step_inc = 0, kbd_step_inc = 0;
 	int j;
 
-	if (dimscreen || useals) {
+	if (dim_screen) {
 		tbacklight = backlight_op(OP_GET, 0);
-
-		if ((int)new_backlight != (int)tbacklight)
+		if (((int)new_backlight != (int)tbacklight))
 			step_inc = (new_backlight - tbacklight) / steps;
 	}
-	if (dimkbd) {
-		tkbdbacklight = kbd_backlight_op(OP_GET, 0);
 
-		if ((int)new_kbd_backlight != (int)tkbdbacklight)
-			kbd_step_inc = (new_kbd_backlight - tkbdbacklight) /
+	if (dim_kbd) {
+		tkbd_backlight = kbd_backlight_op(OP_GET, 0);
+		if ((int)new_kbd_backlight != (int)tkbd_backlight)
+			kbd_step_inc = (new_kbd_backlight - tkbd_backlight) /
 			    steps;
 	}
 
-	if (!(step_inc || kbd_step_inc))
+	if (!step_inc && !kbd_step_inc)
 		return;
 
-	if (dimscreen || useals)
+	if (dim_screen || use_als)
 		DPRINTF(("stepping from %0.2f to %0.2f in increments of %f "
-		    "(%d step%s)\n", tbacklight, new_backlight, step_inc,
-		    steps, (steps == 1 ? "" : "s")));
+		    "(%d step%s)\n", tbacklight, new_backlight, step_inc, steps,
+		    (steps == 1 ? "" : "s")));
 
-	if (dimkbd)
+	if (dim_kbd)
 		DPRINTF(("stepping keyboard from %0.2f to %0.2f in increments "
-		    "of %f (%d step%s)\n", tkbdbacklight, new_kbd_backlight,
+		    "of %f (%d step%s)\n", tkbd_backlight, new_kbd_backlight,
 		    kbd_step_inc, steps, (steps == 1 ? "" : "s")));
 
-	/* discard any stale events */
+	/* discard any stale alarm events */
 	XSync(dpy, True);
 
 	for (j = 1; j <= steps; j++) {
 		XEvent e;
 
-		if (dimscreen || useals)
-			tbacklight += step_inc;
-		if (dimkbd)
-			tkbdbacklight += kbd_step_inc;
-
-		if (j == steps) {
-			if (dimscreen || useals)
+		if (dim_screen || use_als) {
+			if (j == steps)
 				tbacklight = new_backlight;
-			if (dimkbd)
-				tkbdbacklight = new_kbd_backlight;
+			else
+				tbacklight += step_inc;
+
+			backlight_op(OP_SET, tbacklight);
 		}
 
-		if (dimscreen || useals)
-			backlight_op(OP_SET, tbacklight);
-		if (dimkbd)
-			kbd_backlight_op(OP_SET, tkbdbacklight);
+		if (dim_kbd) {
+			if (j == steps)
+				tkbd_backlight = new_kbd_backlight;
+			else
+				tkbd_backlight += kbd_step_inc;
 
-		/* only slow down steps if we're dimming */
-		if (j < steps && (((dimscreen || useals) && (step_inc < 0)) ||
-		    (dimkbd && (kbd_step_inc < 0))))
-			usleep(steps > 50 ? 10000 : 25000);
+			kbd_backlight_op(OP_SET, tkbd_backlight);
+		}
 
-		if (XNextEventOrTimeout(dpy, &e, 1) && e.type != 0) {
-			DPRINTF(("%s: %d event while stepping, breaking "
-			    "early\n", __func__, e.type));
-
+		if (inter && XPeekEventOrTimeout(dpy, &e, 1) != 0) {
+			DPRINTF(("%s: X event of type %d while stepping, "
+			    "breaking early\n", __func__, e.type));
 			return;
 		}
 	}
 }
 
-double
-backlight_op(int op, double new_backlight)
+float
+backlight_op(int op, float new_backlight)
 {
 	Atom actual_type;
 	int actual_format;
@@ -482,10 +416,10 @@ backlight_op(int op, double new_backlight)
 	unsigned char *prop;
 	XRRPropertyInfo *info;
 	long value, to;
-	double min, max;
+	float min, max;
 	int i;
 
-	double cur_backlight = -1.0;
+	float cur_backlight = -1.0;
 
 	if (backlight_a == None) {
 #ifdef __OpenBSD__
@@ -500,7 +434,7 @@ backlight_op(int op, double new_backlight)
 			err(1, "WSDISPLAYIO_GETPARAM failed");
 
 		if (op == OP_SET) {
-			param.curval = (double)(param.max - param.min) *
+			param.curval = (float)(param.max - param.min) *
 				(new_backlight / 100.0);
 
 			if (param.curval > param.max)
@@ -512,8 +446,8 @@ backlight_op(int op, double new_backlight)
 				err(1, "WSDISPLAYIO_SETPARAM failed");
 		}
 
-		cur_backlight = ((double)param.curval /
-		    (double)(param.max - param.min)) * 100;
+		cur_backlight = ((float)param.curval /
+		    (float)(param.max - param.min)) * 100;
 #endif
 	} else {
 		if (op == OP_SET)
@@ -527,8 +461,6 @@ backlight_op(int op, double new_backlight)
 
 		for (i = 0; i < screen_res->noutput; i++) {
 			RROutput output = screen_res->outputs[i];
-
-			/* yay magic numbers */
 
 			if (XRRGetOutputProperty(dpy, output, backlight_a,
 			    0, 4, False, False, None, &actual_type,
@@ -573,7 +505,7 @@ backlight_op(int op, double new_backlight)
 				    backlight_a, XA_INTEGER, 32,
 				    PropModeReplace,
 				    (unsigned char *)&to, 1);
-				XSync(dpy, True);
+				XSync(dpy, False);
 			}
 			else
 				/* just return the first screen's backlight */
@@ -589,8 +521,8 @@ backlight_op(int op, double new_backlight)
 	return cur_backlight;
 }
 
-double
-kbd_backlight_op(int op, double new_backlight)
+float
+kbd_backlight_op(int op, float new_backlight)
 {
 #ifdef __OpenBSD__
 	struct wskbd_backlight param;
@@ -601,8 +533,8 @@ kbd_backlight_op(int op, double new_backlight)
 	if (op == OP_SET) {
 		DPRINTF(("%s: %f\n", __func__, new_backlight));
 
-		param.curval = (double)(param.max - param.min) *
-			(new_backlight / 100.0);
+		param.curval = (float)(param.max - param.min) *
+		    (new_backlight / 100.0);
 
 		if (param.curval > param.max)
 			param.curval = param.max;
@@ -613,7 +545,7 @@ kbd_backlight_op(int op, double new_backlight)
 			err(1, "WSKBDIO_SETBACKLIGHT failed");
 	}
 
-	return ((double)param.curval / (double)(param.max - param.min)) * 100;
+	return ((float)param.curval / (float)(param.max - param.min)) * 100;
 #else
 	return 0;
 #endif
@@ -674,7 +606,7 @@ als_fetch(void)
 	struct sensordev sensordev;
 	struct sensor sensor;
 	size_t sdlen, slen;
-	double lux, tbacklight = backlight, tkbd_backlight = kbd_backlight;
+	float lux, tbacklight = backlight, tkbd_backlight = kbd_backlight;
 	int i;
 
 	sdlen = sizeof(sensordev);
@@ -709,24 +641,22 @@ als_fetch(void)
 
 		DPRINTF(("using lux profile %s\n", as.label));
 
-		if (dimkbd && ((int)round(kbd_backlight) != as.kbd_backlight)) {
+		if (dim_kbd && ((int)round(kbd_backlight) != as.kbd_backlight)) {
 			DPRINTF(("als: adjusting keyboard backlight from %d%% "
 			    "to %d%%\n", (int)round(kbd_backlight),
 			    as.kbd_backlight));
-
 			tkbd_backlight = as.kbd_backlight;
 		}
 
 		if ((int)round(backlight) != as.backlight) {
 			DPRINTF(("als: adjusting screen backlight from %d%% "
 			    "to %d%%\n", (int)round(backlight), as.backlight));
-
 			tbacklight = as.backlight;
 		}
 
 		if ((int)round(kbd_backlight) != tkbd_backlight ||
 		    (int)round(backlight) != tbacklight)
-			stepper(tbacklight, tkbd_backlight, dim_steps);
+			stepper(tbacklight, tkbd_backlight, dim_steps, 0);
 
 		/* become our new normal */
 		backlight = tbacklight;
@@ -751,6 +681,9 @@ usage(void)
 void
 bail(int sig)
 {
+	if (exiting)
+		exit(0);
+
 	DPRINTF(("got signal %d, trying to exit\n", sig));
 
 	/* XXX: doing X ops inside a signal handler causes an infinite loop in
@@ -764,29 +697,25 @@ bail(int sig)
 }
 
 int
-XNextEventOrTimeout(Display *dpy, XEvent *e, unsigned int msecs)
+XPeekEventOrTimeout(Display *dpy, XEvent *e, unsigned int msecs)
 {
-	int fd;
-	fd_set fdsr;
-	struct timeval tv;
+	struct pollfd pfd[1];
 
-	if (msecs == 0) {
-		XNextEvent(dpy, e);
-		return 1;
-	}
+	if (!XPending(dpy)) {
+		memset(&pfd, 0, sizeof(pfd));
+		pfd[0].fd = ConnectionNumber(dpy);
+		pfd[0].events = POLLIN;
 
-	if (XPending(dpy) == 0) {
-		fd = ConnectionNumber(dpy);
-		FD_ZERO(&fdsr);
-		FD_SET(fd, &fdsr);
-		tv.tv_sec = msecs / 1000;
-		tv.tv_usec = (msecs % 1000) * 1000;
-		if (select(fd + 1, &fdsr, NULL, NULL, &tv) >= 0) {
-			e->type = 0;
+		if (poll(pfd, 1, msecs == 0 ? INFTIM : msecs) == 0)
 			return 0;
+
+		if (pfd[0].revents) {
+			DPRINTF(("%s: got X event\n", __func__));
+			XPeekEvent(dpy, e);
+			return 1;
 		}
 	}
 
-	XNextEvent(dpy, e);
+	XPeekEvent(dpy, e);
 	return 1;
 }
