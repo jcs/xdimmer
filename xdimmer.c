@@ -331,7 +331,7 @@ xloop(void)
 }
 
 void
-set_alarm(XSyncAlarm *alarm, XSyncTestType test, unsigned long seconds)
+set_alarm(XSyncAlarm *alarm, XSyncTestType test, unsigned long milliseconds)
 {
 	XSyncAlarmAttributes attr;
 	unsigned int flags;
@@ -339,7 +339,7 @@ set_alarm(XSyncAlarm *alarm, XSyncTestType test, unsigned long seconds)
 	attr.trigger.counter = idler_counter;
 	attr.trigger.value_type = XSyncAbsolute;
 	attr.trigger.test_type = test;
-	XSyncIntToValue(&attr.trigger.wait_value, seconds);
+	XSyncIntToValue(&attr.trigger.wait_value, milliseconds);
 	XSyncIntToValue(&attr.delta, 0);
 
 	flags = XSyncCACounter | XSyncCATestType | XSyncCAValue | XSyncCADelta;
