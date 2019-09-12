@@ -78,6 +78,25 @@ Number of seconds to wait without receiving input before dimming.
 The default is
 .Dv 120
 seconds.
+.Sh SIGNALS
+.Bl -tag -width "SIGUSR1" -compact
+.It Dv SIGINT
+.Nm
+will exit, attempting to brighten the screen and/or keyboard before
+exiting if they are currently in a dimmed state.
+.Pp
+.It Dv SIGUSR1
+.Nm
+will immediately dim the screen and/or keyboard (depending on
+.Ar -k
+and
+.Ar -n
+options).
+.Pp
+.It Dv SIGUSR2
+.Nm
+will immediately brighten the screen and/or keyboard if they are
+in a dimmed state.
 .Sh AUTHORS
 .Nm
 was written by

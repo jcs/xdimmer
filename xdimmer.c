@@ -63,6 +63,12 @@ enum {
 	OP_SET,
 };
 
+enum {
+	MSG_EXIT = 1,
+	MSG_DIM,
+	MSG_BRIGHTEN,
+};
+
 static const struct als_setting {
 	char *label;
 	int min_lux;
@@ -82,8 +88,10 @@ static const struct als_setting {
 };
 
 void xloop(void);
-void set_alarm(XSyncAlarm *, XSyncTestType, unsigned long);
+void set_alarm(XSyncAlarm *, XSyncTestType);
 void bail(int);
+void sigusr1(int);
+void sigusr2(int);
 void stepper(float, float, int, int);
 float backlight_op(int, float);
 float kbd_backlight_op(int, float);
@@ -91,7 +99,7 @@ int als_find_sensor(void);
 void als_fetch(void);
 void usage(void);
 int XPeekEventOrTimeout(Display *, XEvent *, unsigned int);
-int exitmsg[2];
+int pipemsg[2];
 
 extern char *__progname;
 
@@ -116,6 +124,8 @@ static int brighten_steps = DEFAULT_BRIGHTEN_STEPS;
 static Atom backlight_a = 0;
 static XSyncCounter idler_counter = 0;
 static int exiting = 0;
+static int force_dim = 0;
+static int force_brighten = 0;
 static int debug = 0;
 #define DPRINTF(x) { if (debug) { printf x; } };
 
@@ -222,9 +232,11 @@ main(int argc, char *argv[])
 
 	signal(SIGINT, bail);
 	signal(SIGTERM, bail);
+	signal(SIGUSR1, sigusr1);
+	signal(SIGUSR2, sigusr2);
 
-	/* setup a pipe to wait for an exit message from bail() */
-	pipe(exitmsg);
+	/* setup a pipe to wait for messages from signal handlers */
+	pipe(pipemsg);
 
 	xloop();
 
@@ -262,11 +274,12 @@ xloop(void)
 	 * fire an XSyncAlarmNotifyEvent when IDLETIME counter reaches
 	 * dim_timeout seconds
 	 */
-	set_alarm(&idle_alarm, XSyncPositiveComparison, dim_timeout * 1000);
+	set_alarm(&idle_alarm, XSyncPositiveComparison);
 
 	for (;;) {
 		XEvent e;
 		XSyncAlarmNotifyEvent *alarm_e;
+		int do_dim = 0, do_brighten = 0;
 
 		DPRINTF(("waiting for next event\n"));
 
@@ -280,66 +293,83 @@ xloop(void)
 		if (exiting)
 			break;
 
-		XNextEvent(dpy, &e);
+		if (force_dim) {
+			do_dim = force_dim;
+		} else if (force_brighten) {
+			do_brighten = force_brighten;
+		} else {
+			XNextEvent(dpy, &e);
 
-		if (!dim_screen && !dim_kbd)
-			continue;
+			if (!dim_screen && !dim_kbd)
+				continue;
 
-		if (e.type != (sync_event + XSyncAlarmNotify)) {
-			DPRINTF(("got event of type %d\n", e.type));
-			continue;
+			if (e.type != (sync_event + XSyncAlarmNotify)) {
+				DPRINTF(("got event of type %d\n", e.type));
+				continue;
+			}
+
+			alarm_e = (XSyncAlarmNotifyEvent *)&e;
+
+			if (alarm_e->alarm == idle_alarm) {
+				DPRINTF(("idle counter reached %dms, dimming\n",
+				    XSyncValueLow32(alarm_e->counter_value)));
+				do_dim = 1;
+			} else if (alarm_e->alarm == reset_alarm) {
+				DPRINTF(("idle counter reset, brightening\n"));
+				do_brighten = 1;
+			}
 		}
 
-		alarm_e = (XSyncAlarmNotifyEvent *)&e;
-
-		if (alarm_e->alarm == idle_alarm) {
-			DPRINTF(("idle counter reached %dms, dimming\n",
-			    XSyncValueLow32(alarm_e->counter_value)));
-
-			/* fire reset_alarm when idle counter resets */
-			set_alarm(&reset_alarm, XSyncNegativeComparison,
-			    (dim_timeout * 1000) - 1);
+		if (do_dim && !dimmed) {
+			set_alarm(&reset_alarm, XSyncNegativeTransition);
 
 			if (dim_screen)
 				backlight = backlight_op(OP_GET, 0);
 			if (dim_kbd)
 				kbd_backlight = kbd_backlight_op(OP_GET, 0);
 
-			stepper(dim_pct, 0, dim_steps, 1);
+			stepper(dim_pct, 0, force_dim ? 1 : dim_steps, 1);
 			dimmed = 1;
-
-			set_alarm(&reset_alarm, XSyncNegativeComparison,
-			    (dim_timeout * 1000) - 1);
 		}
-		else if (alarm_e->alarm == reset_alarm) {
-			DPRINTF(("idle counter reset, brightening\n"));
-
+		else if (do_brighten && dimmed) {
 			if (use_als)
 				als_fetch();
 
-			set_alarm(&idle_alarm, XSyncPositiveComparison,
-			    dim_timeout * 1000);
+			set_alarm(&idle_alarm, XSyncPositiveComparison);
 
-			stepper(backlight, kbd_backlight, brighten_steps, 0);
+			stepper(backlight, kbd_backlight,
+			    force_brighten ? 1 : brighten_steps, 0);
 			dimmed = 0;
 		}
+
+		force_dim = force_brighten = 0;
 	}
 
-	DPRINTF(("restoring backlight to %f / %f before exiting\n", backlight,
-	    kbd_backlight));
-	stepper(backlight, kbd_backlight, brighten_steps, 0);
+	if (dimmed) {
+		DPRINTF(("restoring backlight to %f / %f before exiting\n",
+		    backlight, kbd_backlight));
+		stepper(backlight, kbd_backlight, brighten_steps, 0);
+	}
 }
 
 void
-set_alarm(XSyncAlarm *alarm, XSyncTestType test, unsigned long milliseconds)
+set_alarm(XSyncAlarm *alarm, XSyncTestType test)
 {
 	XSyncAlarmAttributes attr;
+	XSyncValue value;
 	unsigned int flags;
+	int64_t cur_idle;
+
+	XSyncQueryCounter(dpy, idler_counter, &value);
+	cur_idle = ((int64_t)XSyncValueHigh32(value) << 32) |
+	    XSyncValueLow32(value);
+	DPRINTF(("cur idle %lld\n", cur_idle));
 
 	attr.trigger.counter = idler_counter;
-	attr.trigger.value_type = XSyncAbsolute;
 	attr.trigger.test_type = test;
-	XSyncIntToValue(&attr.trigger.wait_value, milliseconds);
+	attr.trigger.value_type = XSyncRelative;
+	XSyncIntsToValue(&attr.trigger.wait_value, dim_timeout * 1000,
+	    (unsigned long)(dim_timeout * 1000) >> 32);
 	XSyncIntToValue(&attr.delta, 0);
 
 	flags = XSyncCACounter | XSyncCATestType | XSyncCAValue | XSyncCADelta;
@@ -690,6 +720,8 @@ usage(void)
 void
 bail(int sig)
 {
+	int msg = MSG_EXIT;
+
 	if (exiting)
 		exit(0);
 
@@ -700,20 +732,39 @@ bail(int sig)
 	 * polling.
 	 */
 	DPRINTF(("got signal %d, trying to exit\n", sig));
-	write(exitmsg[1], &exitmsg, 1);
+	write(pipemsg[1], &msg, 1);
 	exiting = 1;
+}
+
+void
+sigusr1(int sig)
+{
+	int msg = MSG_DIM;
+
+	DPRINTF(("got signal %d, forcing dim\n", sig));
+	write(pipemsg[1], &msg, 1);
+}
+
+void
+sigusr2(int sig)
+{
+	int msg = MSG_BRIGHTEN;
+
+	DPRINTF(("got signal %d, forcing brighten\n", sig));
+	write(pipemsg[1], &msg, 1);
 }
 
 int
 XPeekEventOrTimeout(Display *dpy, XEvent *e, unsigned int msecs)
 {
 	struct pollfd pfd[2];
+	int msg = 0;
 
 	while (!XPending(dpy)) {
 		memset(&pfd, 0, sizeof(pfd));
 		pfd[0].fd = ConnectionNumber(dpy);
 		pfd[0].events = POLLIN;
-		pfd[1].fd = exitmsg[0];
+		pfd[1].fd = pipemsg[0];
 		pfd[1].events = POLLIN;
 
 		switch (poll(pfd, 2, msecs == 0 ? INFTIM : msecs)) {
@@ -726,8 +777,27 @@ XPeekEventOrTimeout(Display *dpy, XEvent *e, unsigned int msecs)
 			return 0;
 		default:
 			if (pfd[1].revents) {
-				DPRINTF(("%s: got exit message\n", __func__));
-				exiting = 1;
+				read(pipemsg[0], &msg, 1);
+				switch (msg) {
+				case MSG_EXIT:
+					DPRINTF(("%s: got pipe message: exit\n",
+					    __func__));
+					exiting = 1;
+					break;
+				case MSG_DIM:
+					DPRINTF(("%s: got pipe message: dim\n",
+					    __func__));
+					force_dim = 1;
+					break;
+				case MSG_BRIGHTEN:
+					DPRINTF(("%s: got pipe message: "
+					    "brighten\n", __func__));
+					force_brighten = 1;
+					break;
+				default:
+					DPRINTF(("%s: junk on msg pipe: 0x%x\n",
+					    __func__, msg));
+				}
 				return 1;
 			} else if (pfd[0].revents) {
 				DPRINTF(("%s: got X event\n", __func__));
