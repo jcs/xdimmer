@@ -330,8 +330,7 @@ xloop(void)
 
 			stepper(dim_pct, 0, force_dim ? 1 : dim_steps, 1);
 			dimmed = 1;
-		}
-		else if (do_brighten && dimmed) {
+		} else if (do_brighten && dimmed) {
 			if (use_als)
 				als_fetch();
 
@@ -646,7 +645,7 @@ als_fetch(void)
 	struct sensor sensor;
 	size_t sdlen, slen;
 	float lux, tbacklight = backlight, tkbd_backlight = kbd_backlight;
-	int i;
+	int i, init = 0;
 
 	sdlen = sizeof(sensordev);
 	slen = sizeof(sensor);
@@ -659,17 +658,15 @@ als_fetch(void)
 	lux = sensor.value / 1000000.0;
 
 	if ((int)als < 0) {
+		init = 1;
+		als = lux;
+	} else if (abs((int)lux - (int)als) < 10) {
 		als = lux;
 		return;
+	} else {
+		DPRINTF(("als lux change %f -> %f, screen: %f, kbd: %f\n", als,
+		    lux, backlight, kbd_backlight));
 	}
-
-	if (abs((int)lux - (int)als) < 10) {
-		als = lux;
-		return;
-	}
-
-	DPRINTF(("als lux change %f -> %f, screen: %f, kbd: %f\n", als, lux,
-	    backlight, kbd_backlight));
 
 	for (i = (sizeof(als_settings) / sizeof(struct als_setting)) - 1;
 	    i >= 0; i--) {
