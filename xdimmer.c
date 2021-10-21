@@ -492,8 +492,8 @@ backlight_op(int op, float new_backlight)
 			DPRINTF(("%s (xrandr): set %f\n", __func__,
 			    new_backlight));
 
-		XRRScreenResources *screen_res = XRRGetScreenResources(dpy,
-		    DefaultRootWindow(dpy));
+		XRRScreenResources *screen_res =
+		    XRRGetScreenResourcesCurrent(dpy, DefaultRootWindow(dpy));
 		if (!screen_res)
 			errx(1, "no screen resources");
 
