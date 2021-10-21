@@ -386,7 +386,7 @@ stepper(float new_backlight, float new_kbd_backlight, int steps, int inter)
 	float step_inc = 0, kbd_step_inc = 0;
 	int j;
 
-	if (dim_screen) {
+	if (dim_screen || use_als) {
 		tbacklight = backlight_op(OP_GET, 0);
 		if (((int)new_backlight != (int)tbacklight))
 			step_inc = (new_backlight - tbacklight) / steps;
