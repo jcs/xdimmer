@@ -36,6 +36,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/poll.h>
 
 #ifdef __OpenBSD__
 #include <fcntl.h>
@@ -641,14 +642,14 @@ als_find_sensor(void)
 void
 als_fetch(void)
 {
+#ifdef __OpenBSD__
 	struct sensordev sensordev;
 	struct sensor sensor;
-	size_t sdlen, slen;
+	size_t sdlen;
 	float lux, tbacklight = backlight, tkbd_backlight = kbd_backlight;
-	int i, init = 0;
+	int i;
 
 	sdlen = sizeof(sensordev);
-	slen = sizeof(sensor);
 
 	if (sysctl(alsmib, 5, &sensor, &sdlen, NULL, 0) == -1) {
 		warn("sysctl");
@@ -658,7 +659,6 @@ als_fetch(void)
 	lux = sensor.value / 1000000.0;
 
 	if ((int)als < 0) {
-		init = 1;
 		als = lux;
 	} else if (abs((int)lux - (int)als) < 10) {
 		als = lux;
@@ -704,6 +704,7 @@ als_fetch(void)
 	}
 
 	als = lux;
+#endif
 }
 
 void
