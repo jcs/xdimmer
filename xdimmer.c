@@ -27,16 +27,25 @@
  */
 
 #include <err.h>
+#include <errno.h>
 #include <getopt.h>
 #include <limits.h>
 #include <math.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
+#ifdef __linux__
+#include <bsd/stdlib.h>
+#else
 #include <stdlib.h>
+#endif
 #include <string.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <bsd/sys/poll.h>
+#else
 #include <sys/poll.h>
+#endif
 
 #ifdef __OpenBSD__
 #include <fcntl.h>
@@ -70,6 +79,7 @@ enum {
 	MSG_BRIGHTEN,
 };
 
+#ifdef __OpenBSD__
 static const struct als_setting {
 	char *label;
 	int min_lux;
@@ -87,6 +97,7 @@ static const struct als_setting {
 	{ "cloudy outdoors",   10001,	 90,	10 },
 	{ "sunlight",	       30001,	100,	 0 },
 };
+#endif
 
 void xloop(void);
 void set_alarm(XSyncAlarm *, XSyncTestType);
@@ -369,7 +380,7 @@ set_alarm(XSyncAlarm *alarm, XSyncTestType test)
 	attr.trigger.test_type = test;
 	attr.trigger.value_type = XSyncRelative;
 	XSyncIntsToValue(&attr.trigger.wait_value, dim_timeout * 1000,
-	    (unsigned long)(dim_timeout * 1000) >> 32);
+	    ((uint64_t)(dim_timeout * 1000) >> 32));
 	XSyncIntToValue(&attr.delta, 0);
 
 	flags = XSyncCACounter | XSyncCATestType | XSyncCAValue | XSyncCADelta;
