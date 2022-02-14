@@ -14,10 +14,14 @@ INSTALL_DATA ?= install
 X11BASE	?= /usr/X11R6
 INCLUDES?= -I$(X11BASE)/include
 LDPATH	?= -L$(X11BASE)/lib
-LIBS	+= -lX11 -lXrandr -lXext -lm -lbsd
+LIBS	+= -lX11 -lXrandr -lXext -lm
 
 PROG	= xdimmer
 OBJS	= xdimmer.o
+
+ifeq ($(shell uname), Linux)
+	LIBS += -lbsd
+endif
 
 all: $(PROG)
 
