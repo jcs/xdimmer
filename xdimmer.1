@@ -1,4 +1,4 @@
-.Dd $Mdocdate: August 27 2019$
+.Dd $Mdocdate: January 18 2024$
 .Dt XDIMMER 1
 .Os
 .Sh NAME
@@ -10,6 +10,7 @@ light changes
 .Op Fl a
 .Op Fl b Ar brighten steps
 .Op Fl d
+.Op Fl K
 .Op Fl k
 .Op Fl n
 .Op Fl p Ar percent
@@ -58,6 +59,8 @@ The default is
 steps.
 .It Fl d
 Print debugging messages to stdout.
+.It Fl K
+Only listen for keyboard input when resetting the idle timer.
 .It Fl k
 Affect the keyboard backlight as well as the screen backlight.
 Currently only supported on OpenBSD.

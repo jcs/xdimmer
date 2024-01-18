@@ -61,6 +61,8 @@
 #include <X11/Xlib.h>
 #include <X11/extensions/sync.h>
 #include <X11/extensions/Xrandr.h>
+#include <X11/extensions/XInput.h>
+#include <X11/extensions/XInput2.h>
 
 #define DEFAULT_DIM_TIMEOUT	120
 #define DEFAULT_DIM_PERCENTAGE	10
@@ -120,6 +122,7 @@ static int dim_kbd = 0;
 static int dimmed = 0;
 static int dim_screen = 1;
 static int use_als = 0;
+static int kbd_idle_only = 0;
 
 /* ALS reading */
 static float als = -1;
@@ -154,7 +157,7 @@ main(int argc, char *argv[])
 {
 	int ch;
 
-	while ((ch = getopt(argc, argv, "ab:dknp:s:t:")) != -1) {
+	while ((ch = getopt(argc, argv, "ab:dkKnp:s:t:")) != -1) {
 		const char *errstr;
 
 		switch (ch) {
@@ -180,6 +183,9 @@ main(int argc, char *argv[])
 #endif
 			dim_kbd = 1;
 			break;
+		case 'K':
+			kbd_idle_only = 1;
+			break;
 		case 'n':
 			dim_screen = 0;
 			break;
@@ -189,7 +195,7 @@ main(int argc, char *argv[])
 				errx(2, "dim percentage: %s", errstr);
 			break;
 		case 's':
-			dim_steps = strtonum(optarg, 1, 100, &errstr);
+			dim_steps = strtonum(optarg, 1, 500, &errstr);
 			if (errstr)
 				errx(2, "dim steps: %s", errstr);
 			break;
@@ -241,6 +247,8 @@ main(int argc, char *argv[])
 		    dim_timeout));
 	if (use_als)
 		DPRINTF(("automatically updating brightness from ALS\n"));
+	if (kbd_idle_only)
+		DPRINTF(("only watching idle state of keyboard\n"));
 
 	signal(SIGINT, bail);
 	signal(SIGTERM, bail);
@@ -261,23 +269,51 @@ xloop(void)
 	XSyncSystemCounter *counters;
 	XSyncAlarm idle_alarm = None;
 	XSyncAlarm reset_alarm = None;
+	XIDeviceInfo *xinfo;
+	char masdname[25];
 	int sync_event, error;
-	int major, minor, ncounters;
-	int i;
+	int major, minor, ncounters, ndevices;
+	int i, j;
 
 	if (XSyncQueryExtension(dpy, &sync_event, &error) != True)
 		errx(1, "no sync extension available");
 
 	XSyncInitialize(dpy, &major, &minor);
 
+	if (kbd_idle_only) {
+		xinfo = XIQueryDevice(dpy, XIAllDevices, &ndevices);
+		masdname[0] = '\0';
+		for (j = 0; j < ndevices; j++) {
+			if (xinfo[j].use != XIMasterKeyboard)
+				continue;
+
+			snprintf(masdname, sizeof(masdname),
+			    "DEVICEIDLETIME %d", xinfo[j].deviceid);
+			break;
+		}
+		if (masdname[0] == '\0')
+			errx(1, "no xinput master keyboard device found");
+	}
+
 	counters = XSyncListSystemCounters(dpy, &ncounters);
 	for (i = 0; i < ncounters; i++) {
-		if (!strcmp(counters[i].name, "IDLETIME")) {
-			idler_counter = counters[i].counter;
-			break;
+		if (kbd_idle_only) {
+			if (strcmp(counters[i].name, masdname) == 0) {
+				DPRINTF(("using idle time of %s\n",
+				    counters[i].name));
+				idler_counter = counters[i].counter;
+				break;
+			}
+		} else {
+			if (strcmp(counters[i].name, "IDLETIME") == 0) {
+				idler_counter = counters[i].counter;
+				break;
+			}
 		}
 	}
 	XSyncFreeSystemCounterList(counters);
+	if (kbd_idle_only)
+		XIFreeDeviceInfo(xinfo);
 
 	if (!idler_counter)
 		errx(1, "no idle counter");
